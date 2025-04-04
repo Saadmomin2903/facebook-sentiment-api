@@ -14,6 +14,10 @@ import torch
 import torch.quantization
 from transformers import XLMRobertaTokenizer, XLMRobertaForSequenceClassification
 import gc
+import sys
+
+# Force CPU only
+torch.set_num_threads(1)
 
 # Load environment variables
 load_dotenv()
@@ -43,17 +47,19 @@ PORT = int(os.environ.get("PORT", 8002))
 # Memory optimization function
 def optimize_memory():
     gc.collect()
-    torch.cuda.empty_cache()
-    
+    if hasattr(torch, 'cuda'):
+        torch.cuda.empty_cache()
+
 # Model initialization function
 def load_model(model_path):
     try:
+        # Ensure we're using CPU
+        if torch.cuda.is_available():
+            logger.warning("CUDA detected but forcing CPU usage")
+        
         device = torch.device('cpu')
         
-        # Load with reduced precision and memory optimizations
-        checkpoint = torch.load(model_path, map_location=device, weights_only=True)
-        
-        # Initialize model with 8-bit quantization
+        # Load with minimal memory usage
         model = XLMRobertaForSequenceClassification.from_pretrained(
             "xlm-roberta-base",
             num_labels=3,
@@ -61,21 +67,31 @@ def load_model(model_path):
             low_cpu_mem_usage=True
         )
         
-        # Prepare model for quantization
+        # Load checkpoint with memory optimization
+        checkpoint = torch.load(model_path, map_location='cpu', weights_only=True)
+        
+        # Clean up checkpoint data
+        state_dict = checkpoint['model_state_dict']
+        del checkpoint
+        optimize_memory()
+        
+        if 'roberta.embeddings.position_ids' in state_dict:
+            del state_dict['roberta.embeddings.position_ids']
+        
+        # Load state dict and clean up
+        model.load_state_dict(state_dict, strict=False)
+        del state_dict
+        optimize_memory()
+        
+        # Prepare model for inference
         model.eval()
         model = torch.quantization.quantize_dynamic(
             model, {torch.nn.Linear}, dtype=torch.qint8
         )
         
-        # Load state dict
-        state_dict = checkpoint['model_state_dict']
-        if 'roberta.embeddings.position_ids' in state_dict:
-            del state_dict['roberta.embeddings.position_ids']
-        
-        model.load_state_dict(state_dict, strict=False)
-        
-        # Convert to TorchScript and optimize
-        model = torch.jit.optimize_for_inference(torch.jit.script(model))
+        # Convert to TorchScript for better memory usage
+        model = torch.jit.script(model)
+        model = torch.jit.optimize_for_inference(model)
         
         return model
     except Exception as e:
@@ -573,16 +589,16 @@ async def root():
 async def analyze_sentiment_text(text: str) -> dict:
     """Analyze the sentiment of a given text."""
     try:
-        # Tokenize with max length to save memory
+        # Tokenize with memory optimization
         inputs = tokenizer(
             text,
             return_tensors="pt",
             truncation=True,
-            max_length=256,  # Reduced from 512
+            max_length=128,  # Further reduced for memory
             padding=True
         )
         
-        # Get prediction with no gradient computation
+        # Get prediction with memory optimization
         with torch.no_grad():
             outputs = model(**inputs)
             predictions = torch.nn.functional.softmax(outputs.logits, dim=-1)
@@ -591,8 +607,8 @@ async def analyze_sentiment_text(text: str) -> dict:
             predicted_label = sentiment_labels[predicted_idx]
             confidence = float(predictions.max().item())
             
-            # Clear memory after prediction
-            del outputs, predictions
+            # Clean up tensors
+            del outputs, predictions, inputs
             optimize_memory()
             
             return {
