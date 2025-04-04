@@ -67,14 +67,19 @@ ENV TRANSFORMERS_CACHE=/app/models/cache
 ENV TORCH_HOME=/app/models/torch
 ENV TRANSFORMERS_OFFLINE=1
 
-# Create startup script
+# Create startup script with memory management
 RUN echo '#!/bin/bash\n\
+    # Set memory limit\n\
     ulimit -v 512000\n\
+    # Set PyTorch environment\n\
     export LD_LIBRARY_PATH=/usr/local/lib/python3.9/site-packages/torch/lib:$LD_LIBRARY_PATH\n\
+    # Download model\n\
     /app/download_model.sh\n\
+    # Cleanup\n\
     rm -rf /root/.cache/pip\n\
     rm -rf /tmp/*\n\
-    exec uvicorn api:app --host 0.0.0.0 --port $PORT --workers 1 --limit-concurrency 1 --memory-limit 512\n' > /app/start.sh \
+    # Start server with minimal footprint\n\
+    exec uvicorn api:app --host 0.0.0.0 --port $PORT --workers 1 --limit-concurrency 1 --no-access-log\n' > /app/start.sh \
     && chmod +x /app/start.sh
 
 # Run the startup script
