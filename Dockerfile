@@ -37,6 +37,8 @@ RUN mkdir -p /app/models
 
 # Copy application code and scripts
 COPY api.py .
+COPY custom_sentiment.py .
+COPY simple_sentiment.py .
 COPY download_model.sh .
 RUN chmod +x download_model.sh
 
