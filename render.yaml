@@ -2,17 +2,17 @@ services:
   - type: web
     name: fb-sentiment-api
     env: docker
-    plan: free
+    plan: standard  # Upgraded from free to standard plan for more memory
     envVars:
       - key: PORT
         value: 10000
       - key: MODEL_PATH
         value: /app/models/best_marathi_sentiment_model.pth
       - key: MODEL_URL
-        value: https://github.com/Saadmomin2903/facebook-sentiment-api/releases/tag/v1.0.0/best_marathi_sentiment_model.pth
+        value: https://github.com/Saadmomin2903/facebook-sentiment-api/releases/download/v1.0.0/best_marathi_sentiment_model.pth
       - key: FB_EMAIL
         sync: false
       - key: FB_PASSWORD
         sync: false
-    healthCheckPath: /test-sentiment
+    healthCheckPath: /
     buildCommand: docker build -t fb-sentiment-api .
