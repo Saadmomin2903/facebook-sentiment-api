@@ -1,176 +1,543 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from typing import List, Optional
+import asyncio
+from playwright.async_api import async_playwright
+import json
+from datetime import datetime
 import uvicorn
-import os
-from typing import Optional
-import sys
+from custom_sentiment import CustomMarathiSentimentAnalyzer
 import logging
-from custom_sentiment import CustomSentimentAnalyzer
-from simple_sentiment import SimpleSentimentAnalyzer
-import time
-import random
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
-import base64
-from io import BytesIO
-from PIL import Image
+import os
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, 
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
+app = FastAPI(title="Facebook Post Scraper and Sentiment Analysis API")
 
-class SentimentResponse(BaseModel):
-    sentiment: str
-    confidence: float
-    text: str
+# Pre-defined Facebook credentials (from environment variables for security)
+FB_EMAIL = os.environ.get("FB_EMAIL", "saadmomin5555@gmail.com")
+FB_PASSWORD = os.environ.get("FB_PASSWORD", "Saad@2903")
 
-class PostAnalysis(BaseModel):
-    post_text: str
-    sentiment: str
-    confidence: float
-    sentiment_scores: dict
+# Model path from environment variables (for container deployment)
+MODEL_PATH = os.environ.get("MODEL_PATH", "best_marathi_sentiment_model.pth")
 
-def setup_selenium():
-    chrome_options = Options()
-    chrome_options.add_argument('--headless')
-    chrome_options.add_argument('--no-sandbox')
-    chrome_options.add_argument('--disable-dev-shm-usage')
-    chrome_options.add_argument('--disable-gpu')
-    chrome_options.add_argument('--window-size=1920,1080')
+# Set host and port from environment variables (for cloud deployments)
+HOST = os.environ.get("HOST", "0.0.0.0")
+PORT = int(os.environ.get("PORT", 8002))
+
+# Add a simplified app description
+app.description = """
+### Facebook Post Scraper and Sentiment Analysis API
+
+This API provides tools to:
+1. Scrape Facebook posts and comments
+2. Analyze the sentiment of comments in Marathi with special handling for devotional content
+
+#### Quick Start:
+- Use `/analyze-fb-post?url=YOUR_FB_POST_URL` for a one-click analysis
+"""
+
+# Dictionary of test sentences with known sentiments for validation
+TEST_SENTENCES = {
+    "तुमचे काम खूप छान आहे!": "Positive",           # Your work is very nice!
+    "हे फारच वाईट आहे": "Negative",                 # This is very bad
+    "बरं आहे असं वाटतं": "Neutral",                 # It seems okay
+    "आज हवामान छान आहे": "Positive",               # The weather is nice today
+    "मला हा फिल्म आवडला नाही": "Negative",          # I didn't like this movie
+    "परीक्षेत नापास होणे दु:खद आहे": "Negative",    # Failing in the exam is sad
+    "श्री अंबाबाई माते की जय": "Positive",          # Devotional phrase (should be positive)
+    "जय माता दी": "Positive"                        # Devotional phrase (should be positive)
+}
+
+# Initialize sentiment analyzer here but we'll re-initialize it in the startup event
+sentiment_analyzer = None
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize the sentiment analyzer at startup and validate it with test sentences"""
+    global sentiment_analyzer
     
-    driver = webdriver.Chrome(options=chrome_options)
-    return driver
+    logger.info(f"Initializing custom sentiment analyzer with model at: {MODEL_PATH}")
+    sentiment_analyzer = CustomMarathiSentimentAnalyzer(MODEL_PATH)
+    
+    # Validate the model with test sentences
+    logger.info("Validating sentiment model with test sentences...")
+    all_passed = True
+    for text, expected_sentiment in TEST_SENTENCES.items():
+        result = sentiment_analyzer.predict(text)
+        logger.info(f"Test: '{text}' → Expected: {expected_sentiment}, Got: {result['sentiment']} (Confidence: {result['confidence']:.2f})")
+        if result['sentiment'] != expected_sentiment:
+            logger.warning(f"❌ Test failed for '{text}': Expected {expected_sentiment}, got {result['sentiment']}")
+            all_passed = False
+    
+    if all_passed:
+        logger.info("✅ All sentiment validation tests passed!")
+    else:
+        logger.warning("⚠️ Some sentiment validation tests failed. Model may need recalibration.")
 
-def login_to_facebook(driver, email, password):
-    try:
-        driver.get("https://www.facebook.com")
-        time.sleep(random.uniform(2, 4))
-        
-        # Accept cookies if the dialog appears
+class FacebookCredentials(BaseModel):
+    email: str
+    password: str
+    post_url: str
+
+class PostUrlRequest(BaseModel):
+    post_url: str
+
+class Comment(BaseModel):
+    author: str
+    comment: str
+    timestamp: str
+    reactions: int = 0
+    isReply: bool = False
+
+class PostData(BaseModel):
+    author: str
+    post_content: str
+    post_time: str
+    post_url: str
+    comments: List[dict]
+    scraped_at: str
+
+class CommentSentiment(BaseModel):
+    author: str
+    comment: str
+    time: str
+    sentiment: str
+    confidence: float
+
+class SentimentAnalysisResponse(BaseModel):
+    post_info: dict
+    comments_sentiment: List[CommentSentiment]
+    metadata: dict
+
+class FacebookScraper:
+    def __init__(self):
+        self.browser = None
+        self.page = None
+        self.context = None
+        self.playwright = None
+
+    async def initialize(self):
+        self.playwright = await async_playwright().start()
+        self.browser = await self.playwright.chromium.launch(
+            headless=True,
+            args=[
+                '--disable-notifications',
+                '--disable-dev-shm-usage',
+                '--no-sandbox'
+            ]
+        )
+        self.context = await self.browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
+            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+        )
+        self.page = await self.context.new_page()
+
+    async def login(self, email: str, password: str):
         try:
-            cookie_button = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(string(), 'Allow')]"))
-            )
-            cookie_button.click()
-            time.sleep(random.uniform(1, 2))
-        except:
-            pass
-        
-        # Fill in login form
-        email_field = driver.find_element(By.ID, "email")
-        email_field.send_keys(email)
-        time.sleep(random.uniform(0.5, 1.5))
-        
-        password_field = driver.find_element(By.ID, "pass")
-        password_field.send_keys(password)
-        time.sleep(random.uniform(0.5, 1.5))
-        
-        # Click login button
-        login_button = driver.find_element(By.NAME, "login")
-        login_button.click()
-        time.sleep(random.uniform(3, 5))
-        
-        # Check for login success
-        if "checkpoint" in driver.current_url:
-            # Take screenshot for debugging
-            driver.save_screenshot("login_error.png")
-            raise Exception("Login failed - checkpoint encountered")
+            logger.info(f"Navigating to Facebook...")
+            await self.page.goto('https://www.facebook.com/', timeout=60000)
+            logger.info(f"Facebook loaded")
+
+            # Accept cookies if present
+            try:
+                logger.info("Looking for cookie consent button...")
+                cookie_button = await self.page.query_selector('button[data-cookiebanner="accept_button"]')
+                if cookie_button:
+                    await cookie_button.click()
+                    logger.info("Clicked cookie consent button")
+                    await asyncio.sleep(3)
+            except Exception as e:
+                logger.info(f'No cookie banner found: {str(e)}')
+
+            # Login
+            logger.info("Filling login credentials...")
+            await self.page.fill('#email', email)
+            await self.page.fill('#pass', password)
+
+            # Click login button
+            logger.info("Clicking login button...")
+            await self.page.click('button[name="login"]')
             
-        return True
-    except Exception as e:
-        logger.error(f"Login failed: {str(e)}")
-        return False
+            # Wait for navigation with extended timeout
+            logger.info("Waiting for navigation...")
+            await self.page.wait_for_load_state('networkidle', timeout=60000)
+            logger.info("Navigation complete")
+            await asyncio.sleep(10)
 
-def scrape_facebook_post(driver, post_url):
-    try:
-        driver.get(post_url)
-        time.sleep(random.uniform(3, 5))
-        
-        # Extract post content
-        post_content = ""
+            # Check login success
+            current_url = self.page.url
+            logger.info(f"Current URL: {current_url}")
+            if 'checkpoint' in current_url or 'login' in current_url:
+                raise Exception('Login failed - Please check credentials or handle 2FA')
+            
+            logger.info("Login successful")
+
+        except Exception as e:
+            logger.error(f"Login error: {str(e)}")
+            # Take a screenshot for debugging
+            try:
+                await self.page.screenshot(path="login_error.png")
+                logger.info("Screenshot saved to login_error.png")
+            except Exception as screenshot_error:
+                logger.error(f"Failed to take screenshot: {str(screenshot_error)}")
+            raise HTTPException(status_code=401, detail=f"Login failed: {str(e)}")
+
+    async def expand_all_comments(self):
         try:
-            post_element = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.XPATH, "//div[@data-ad-preview='message']"))
-            )
-            post_content = post_element.text
-        except:
-            logger.warning("Could not find post content")
-        
-        return post_content
-    except Exception as e:
-        logger.error(f"Scraping failed: {str(e)}")
-        return None
+            for _ in range(10):  # Try expanding 10 times maximum
+                try:
+                    # Click "View more comments" buttons
+                    more_buttons = await self.page.query_selector_all('div[role="button"]')
+                    clicked = False
 
-@app.get("/")
-async def root():
-    return {"message": "Facebook Sentiment Analysis API is running"}
+                    for button in more_buttons:
+                        try:
+                            text = await button.text_content()
+                            if text and ('view more comments' in text.lower() or 
+                                       'previous comments' in text.lower()):
+                                await button.click()
+                                clicked = True
+                                await asyncio.sleep(2)
+                        except:
+                            continue
 
-@app.get("/test-sentiment")
-async def test_sentiment():
+                    if not clicked:
+                        break
+
+                except Exception as e:
+                    logger.error(f"Error expanding comments: {e}")
+                    break
+
+                await asyncio.sleep(2)
+        except Exception as e:
+            logger.error(f"Error in expand_all_comments: {e}")
+
+    async def scrape_post(self, post_url: str) -> dict:
+        try:
+            logger.info(f"Navigating to post: {post_url}")
+            await self.page.goto(post_url, timeout=60000)
+            logger.info("Post page loaded")
+            await self.page.wait_for_load_state('networkidle', timeout=60000)
+            logger.info("Network idle")
+            await asyncio.sleep(10)
+            
+            logger.info("Extracting post content...")
+
+            # Get post content
+            post_data = await self.page.evaluate('''() => {
+                const postTexts = Array.from(document.querySelectorAll('div[dir="auto"]'))
+                    .map(el => el.textContent.trim())
+                    .filter(text => text.length > 0);
+
+                const postContent = postTexts.reduce((longest, current) => 
+                    current.length > longest.length ? current : longest, '');
+
+                const authorElement = document.querySelector('h2 a') || 
+                                    document.querySelector('strong a') ||
+                                    document.querySelector('a[role="link"]');
+
+                const timestampElement = Array.from(document.querySelectorAll('a[role="link"] span'))
+                    .find(span => {
+                        const text = span.textContent.toLowerCase();
+                        return text.includes('h') || text.includes('m') || text.includes('d');
+                    });
+
+                return {
+                    author: authorElement ? authorElement.textContent.trim() : 'Unknown',
+                    post_content: postContent,
+                    post_time: timestampElement ? timestampElement.textContent.trim() : '',
+                    post_url: window.location.href
+                };
+            }''')
+
+            # Expand and get comments
+            await self.expand_all_comments()
+
+            comments = await self.page.evaluate('''() => {
+                const comments = [];
+                const commentElements = Array.from(document.querySelectorAll('div[role="article"]'));
+                
+                commentElements.forEach(comment => {
+                    try {
+                        const contentElement = comment.querySelector('div[dir="auto"]:not([style*="display: none"])');
+                        if (!contentElement) return;
+
+                        const content = contentElement.textContent.trim();
+                        if (!content) return;
+
+                        const authorElement = comment.querySelector('a[role="link"]:not([href*="reaction"])');
+                        const timestampElement = comment.querySelector('a[role="link"] span[dir="auto"]');
+                        
+                        comments.push({
+                            'author': authorElement ? authorElement.textContent.trim() : 'Unknown',
+                            'comment': content,
+                            'time': timestampElement ? timestampElement.textContent.trim() : '',
+                            'reactions': 0,
+                            'is_reply': !!comment.closest('div[role="article"] div[role="article"]')
+                        });
+                    } catch (e) {
+                        console.error('Error processing comment:', e);
+                    }
+                });
+
+                return comments;
+            }''')
+
+            formatted_data = {
+                'post': {
+                    'author': post_data['author'],
+                    'content': post_data['post_content'],
+                    'time': post_data['post_time'],
+                    'url': post_data['post_url']
+                },
+                'comments': comments,
+                'metadata': {
+                    'total_comments': len(comments),
+                    'scraped_at': datetime.now().isoformat()
+                }
+            }
+
+            return formatted_data
+
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error scraping post: {str(e)}")
+
+    async def close(self):
+        if self.context:
+            await self.context.close()
+        if self.browser:
+            await self.browser.close()
+        if self.playwright:
+            await self.playwright.stop()
+
+@app.post("/scrape-post")
+async def scrape_facebook_post(credentials: FacebookCredentials):
+    scraper = FacebookScraper()
     try:
-        model_path = os.getenv("MODEL_PATH", "Not set")
-        analyzer = CustomSentimentAnalyzer(model_path)
+        await scraper.initialize()
+        await scraper.login(credentials.email, credentials.password)
+        post_data = await scraper.scrape_post(credentials.post_url)
+        return post_data
+    finally:
+        await scraper.close()
+
+@app.post("/analyze-post-sentiment")
+async def analyze_post_sentiment(request: PostUrlRequest):
+    scraper = FacebookScraper()
+    try:
+        # Initialize and login with predefined credentials
+        logger.info("Initializing scraper for sentiment analysis...")
+        await scraper.initialize()
         
-        # Test with some sample Marathi text
-        test_text = "आज खूप छान दिवस होता!"
-        result = analyzer.analyze_sentiment(test_text)
+        logger.info("Logging in with predefined credentials...")
+        await scraper.login(FB_EMAIL, FB_PASSWORD)
         
-        return {
-            "status": "success",
-            "message": "Sentiment analysis service is working",
-            "model_path": model_path,
-            "test_result": result
+        # Scrape the post
+        logger.info(f"Scraping post: {request.post_url}")
+        post_data = await scraper.scrape_post(request.post_url)
+        logger.info(f"Found {len(post_data['comments'])} comments to analyze")
+        
+        # Analyze the sentiment of each comment
+        comments_with_sentiment = []
+        for i, comment in enumerate(post_data['comments']):
+            # Only analyze if the comment has content
+            if 'comment' in comment and comment['comment']:
+                logger.info(f"Analyzing comment {i+1}/{len(post_data['comments'])}: {comment['comment'][:50]}...")
+                try:
+                    # Perform sentiment analysis
+                    sentiment_result = sentiment_analyzer.predict(comment['comment'])
+                    
+                    # Create a CommentSentiment object
+                    comment_sentiment = {
+                        'author': comment.get('author', 'Unknown'),
+                        'comment': comment['comment'],
+                        'time': comment.get('time', ''),
+                        'sentiment': sentiment_result['sentiment'],
+                        'confidence': sentiment_result['confidence']
+                    }
+                    comments_with_sentiment.append(comment_sentiment)
+                    logger.info(f"  Sentiment: {sentiment_result['sentiment']}, Confidence: {sentiment_result['confidence']:.2f}")
+                except Exception as e:
+                    logger.error(f"Error analyzing comment: {str(e)}")
+                    # Still include the comment but with error sentiment
+                    comment_sentiment = {
+                        'author': comment.get('author', 'Unknown'),
+                        'comment': comment['comment'],
+                        'time': comment.get('time', ''),
+                        'sentiment': 'Error',
+                        'confidence': 0.0
+                    }
+                    comments_with_sentiment.append(comment_sentiment)
+        
+        # Prepare the response
+        logger.info(f"Preparing response with {len(comments_with_sentiment)} analyzed comments")
+        response = {
+            'post_info': post_data['post'],
+            'comments_sentiment': comments_with_sentiment,
+            'metadata': {
+                'total_comments': len(comments_with_sentiment),
+                'scraped_at': post_data['metadata']['scraped_at']
+            }
         }
+        
+        return response
+        
     except Exception as e:
-        logger.error(f"Error in test_sentiment: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error in sentiment analysis endpoint: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error analyzing post sentiment: {str(e)}")
+    finally:
+        logger.info("Closing scraper")
+        await scraper.close()
 
 @app.get("/analyze-fb-post")
 async def analyze_fb_post(url: str):
+    """
+    Single GET endpoint to analyze a Facebook post with a URL parameter.
+    Uses predefined Facebook credentials and analyzes comment sentiment.
+    
+    Example: `/analyze-fb-post?url=https://www.facebook.com/sample/post`
+    """
+    scraper = FacebookScraper()
     try:
-        # Get Facebook credentials from environment variables
-        fb_email = os.getenv("FB_EMAIL")
-        fb_password = os.getenv("FB_PASSWORD")
+        logger.info(f"Starting one-click analysis for URL: {url}")
         
-        if not fb_email or not fb_password:
-            raise HTTPException(status_code=500, detail="Facebook credentials not configured")
-        
-        # Initialize sentiment analyzer
-        model_path = os.getenv("MODEL_PATH")
-        analyzer = CustomSentimentAnalyzer(model_path)
-        
-        # Setup Selenium and login
-        driver = setup_selenium()
-        if not login_to_facebook(driver, fb_email, fb_password):
-            driver.quit()
-            raise HTTPException(status_code=401, detail="Facebook login failed")
+        # Initialize and login with predefined credentials
+        await scraper.initialize()
+        await scraper.login(FB_EMAIL, FB_PASSWORD)
         
         # Scrape the post
-        post_content = scrape_facebook_post(driver, url)
-        driver.quit()
+        post_data = await scraper.scrape_post(url)
         
-        if not post_content:
-            raise HTTPException(status_code=404, detail="Could not extract post content")
-        
-        # Analyze sentiment
-        result = analyzer.analyze_sentiment(post_content)
-        
-        return {
-            "post_text": post_content,
-            "sentiment": result["sentiment"],
-            "confidence": result["confidence"],
-            "sentiment_scores": result["sentiment_scores"]
+        # Summarize post information
+        post_summary = {
+            "title": post_data['post']['content'][:100] + "..." if len(post_data['post']['content']) > 100 else post_data['post']['content'],
+            "author": post_data['post']['author'],
+            "time": post_data['post']['time'],
+            "total_comments": len(post_data['comments'])
         }
+        
+        # Analyze the sentiment of each comment
+        comment_analysis = []
+        sentiment_counts = {"Positive": 0, "Negative": 0, "Neutral": 0, "Error": 0}
+        
+        # First verify the model is working as expected with a test case
+        test_text = "तुमचे काम खूप छान आहे!"  # "Your work is very nice!"
+        test_result = sentiment_analyzer.predict(test_text)
+        logger.info(f"Verification test: '{test_text}' → Got: {test_result['sentiment']} (Expected: Positive)")
+        
+        # No need to print label mapping
+        
+        for comment in post_data['comments']:
+            if 'comment' in comment and comment['comment']:
+                try:
+                    # Log the exact comment for debugging
+                    comment_text = comment['comment']
+                    logger.info(f"Processing comment: '{comment_text}'")
+                    
+                    # Clean the comment text if needed
+                    cleaned_text = comment_text.strip()
+                    
+                    # Analyze the comment's sentiment
+                    sentiment_result = sentiment_analyzer.predict(cleaned_text)
+                    sentiment_label = sentiment_result['sentiment']
+                    confidence = sentiment_result['confidence']
+                    
+                    logger.info(f"⭐ Result: {sentiment_label} (Confidence: {confidence:.2f})")
+                    
+                    # Create a comment sentiment entry
+                    comment_item = {
+                        'author': comment.get('author', 'Unknown'),
+                        'comment': comment_text,
+                        'time': comment.get('time', ''),
+                        'sentiment': sentiment_label,
+                        'confidence': round(confidence, 2)
+                    }
+                    comment_analysis.append(comment_item)
+                    
+                    # Update sentiment counts
+                    sentiment_counts[sentiment_label] += 1
+                    
+                except Exception as e:
+                    logger.error(f"Error analyzing comment: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    
+                    # Still include the comment but with error sentiment
+                    comment_item = {
+                        'author': comment.get('author', 'Unknown'),
+                        'comment': comment['comment'],
+                        'time': comment.get('time', ''),
+                        'sentiment': 'Error',
+                        'confidence': 0.0
+                    }
+                    comment_analysis.append(comment_item)
+                    sentiment_counts["Error"] += 1
+        
+        # Calculate sentiment distribution percentage
+        total_comments = len(comment_analysis)
+        sentiment_distribution = {
+            "positive_percent": round(sentiment_counts["Positive"] / total_comments * 100, 1) if total_comments > 0 else 0,
+            "negative_percent": round(sentiment_counts["Negative"] / total_comments * 100, 1) if total_comments > 0 else 0,
+            "neutral_percent": round(sentiment_counts["Neutral"] / total_comments * 100, 1) if total_comments > 0 else 0,
+        }
+        
+        # Prepare the comprehensive response
+        response = {
+            'post': post_summary,
+            'sentiment_summary': {
+                'counts': sentiment_counts,
+                'distribution': sentiment_distribution
+            },
+            'comment_analysis': comment_analysis,
+            'metadata': {
+                'scraped_at': post_data['metadata']['scraped_at'],
+                'analyzed_comments': total_comments
+            }
+        }
+        
+        return response
+        
     except Exception as e:
-        logger.error(f"Error in analyze_fb_post: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error in one-click analysis: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error analyzing Facebook post: {str(e)}")
+    finally:
+        await scraper.close()
+
+# Add a test endpoint to verify sentiment model is working correctly
+@app.get("/test-sentiment")
+async def test_sentiment():
+    """Test endpoint to verify the sentiment model is working correctly"""
+    results = []
+    
+    # Test each sample
+    for text, expected in TEST_SENTENCES.items():
+        result = sentiment_analyzer.predict(text)
+        results.append({
+            "text": text,
+            "expected": expected,
+            "predicted": result["sentiment"],
+            "confidence": round(result["confidence"], 2),
+            "match": expected == result["sentiment"]
+        })
+    
+    # Calculate accuracy
+    correct = sum(1 for r in results if r["match"])
+    accuracy = round(correct / len(results) * 100, 1)
+    
+    return {
+        "accuracy": f"{accuracy}%",
+        "correct": correct,
+        "total": len(results),
+        "results": results
+    }
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 10000))
-    uvicorn.run("api:app", host="0.0.0.0", port=port, reload=True) 
+    uvicorn.run(app, host=HOST, port=PORT) 
