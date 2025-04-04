@@ -28,7 +28,7 @@ RUN CHROME_DRIVER_VERSION="114.0.5735.90" \
     && chmod +x /usr/bin/chromedriver \
     && rm chromedriver_linux64.zip
 
-# Copy and install requirements
+# Copy requirements first to leverage Docker cache
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -36,13 +36,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN mkdir -p /app/models
 
 # Copy application code and scripts
-COPY . .
-COPY download_model.sh /app/
-RUN chmod +x /app/download_model.sh
+COPY api.py .
+COPY download_model.sh .
+RUN chmod +x download_model.sh
 
 # Default env variables (can be overridden)
 ENV PORT=10000
 ENV MODEL_PATH=/app/models/best_marathi_sentiment_model.pth
 
 # Run the download script and then start the application
-CMD /app/download_model.sh && uvicorn api:app --host 0.0.0.0 --port $PORT 
+CMD ./download_model.sh && uvicorn api:app --host 0.0.0.0 --port $PORT 
