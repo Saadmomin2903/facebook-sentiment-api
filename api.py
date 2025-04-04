@@ -10,6 +10,8 @@ import uvicorn
 import logging
 import os
 import io
+import mmap
+import resource
 from dotenv import load_dotenv
 import torch
 import torch.quantization
@@ -18,10 +20,16 @@ import gc
 import sys
 import numpy as np
 from pathlib import Path
+import psutil
 
-# Force CPU only and set memory limits
+# Force absolute minimal resource usage
 torch.set_num_threads(1)
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:64'
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:32'
 
 # Load environment variables
 load_dotenv()
@@ -31,20 +39,35 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+def limit_memory():
+    """Limit memory usage for the current process"""
+    process = psutil.Process(os.getpid())
+    
+    # Set soft limit to 450MB
+    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+    resource.setrlimit(resource.RLIMIT_AS, (450 * 1024 * 1024, hard))
+    
+    # Set CPU affinity to use only one core
+    try:
+        process.cpu_affinity([0])
+    except AttributeError:
+        pass  # Not supported on all platforms
+
 class ModelManager:
     def __init__(self):
         self.model = None
         self.tokenizer = None
         self.is_initialized = False
         self.sentiment_labels = {0: 'Negative', 1: 'Neutral', 2: 'Positive'}
-
+        self.chunk_size = 32 * 1024 * 1024  # 32MB chunks
+        
     @staticmethod
     def optimize_memory():
         gc.collect()
         if hasattr(torch, 'cuda'):
             torch.cuda.empty_cache()
         
-    def load_model_in_chunks(self, model_path, chunk_size=64*1024*1024):  # 64MB chunks
+    def load_model_in_chunks(self, model_path):
         try:
             # Clear any existing model
             if self.model is not None:
@@ -53,60 +76,77 @@ class ModelManager:
 
             logger.info("Loading model in chunks...")
             
-            # Load model config first
+            # Initialize base model with minimal memory
             model = XLMRobertaForSequenceClassification.from_pretrained(
                 "xlm-roberta-base",
                 num_labels=3,
                 torchscript=True,
-                low_cpu_mem_usage=True
+                low_cpu_mem_usage=True,
+                return_dict=False
             )
             
-            # Load checkpoint in chunks
-            checkpoint = {}
+            # Use memory mapping to load the file
             with open(model_path, 'rb') as f:
-                # Read file size
-                f.seek(0, 2)
-                file_size = f.tell()
-                f.seek(0)
-                
-                # Read in chunks
-                buffer = bytearray()
-                for chunk in range(0, file_size, chunk_size):
-                    buffer.extend(f.read(min(chunk_size, file_size - chunk)))
-                    logger.info(f"Read {len(buffer)}/{file_size} bytes")
+                with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                    # Read file size
+                    file_size = len(mm)
                     
-                    # Try to load if we have enough data
-                    if len(buffer) == file_size:
-                        checkpoint = torch.load(
-                            io.BytesIO(buffer), 
-                            map_location='cpu',
-                            weights_only=True
-                        )
-                        break
+                    # Read in chunks using memory mapping
+                    buffer = bytearray()
+                    offset = 0
                     
-                    # Clear some memory
+                    while offset < file_size:
+                        chunk_size = min(self.chunk_size, file_size - offset)
+                        buffer.extend(mm[offset:offset + chunk_size])
+                        offset += chunk_size
+                        
+                        logger.info(f"Read {offset}/{file_size} bytes")
+                        self.optimize_memory()
+                    
+                    # Load checkpoint from buffer
+                    checkpoint = torch.load(
+                        io.BytesIO(buffer),
+                        map_location='cpu',
+                        weights_only=True
+                    )
+                    
+                    # Clean up buffer
+                    del buffer
                     self.optimize_memory()
             
-            # Clean up buffer
-            del buffer
-            self.optimize_memory()
-            
-            # Process state dict
+            # Process state dict in chunks
             state_dict = checkpoint['model_state_dict']
             del checkpoint
             self.optimize_memory()
             
-            # Remove position_ids if present
             if 'roberta.embeddings.position_ids' in state_dict:
                 del state_dict['roberta.embeddings.position_ids']
             
-            # Load state dict in chunks
+            # Load state dict in chunks with numpy intermediates
             for key in list(state_dict.keys()):
                 if isinstance(state_dict[key], torch.Tensor):
-                    # Convert to numpy, then back to torch to reduce memory
-                    state_dict[key] = torch.from_numpy(
-                        np.array(state_dict[key].cpu().numpy())
-                    )
+                    # Process tensor in chunks if it's large
+                    tensor = state_dict[key]
+                    if tensor.numel() * tensor.element_size() > self.chunk_size:
+                        # Convert to numpy array in chunks
+                        shape = tensor.shape
+                        dtype = tensor.dtype
+                        np_array = np.empty(shape, dtype=np.float32)
+                        
+                        # Process in chunks
+                        chunk_size = self.chunk_size // (tensor.element_size() * np.prod(shape[1:]))
+                        for i in range(0, shape[0], chunk_size):
+                            end = min(i + chunk_size, shape[0])
+                            np_array[i:end] = tensor[i:end].cpu().numpy()
+                            self.optimize_memory()
+                        
+                        # Convert back to torch tensor
+                        state_dict[key] = torch.from_numpy(np_array)
+                        del np_array
+                    else:
+                        # Small tensor, process directly
+                        state_dict[key] = torch.from_numpy(np.array(tensor.cpu()))
+                    
                     self.optimize_memory()
             
             # Load state dict
@@ -114,15 +154,18 @@ class ModelManager:
             del state_dict
             self.optimize_memory()
             
-            # Quantize model
+            # Quantize and optimize
             model.eval()
             model = torch.quantization.quantize_dynamic(
-                model, {torch.nn.Linear}, dtype=torch.qint8
+                model, 
+                {torch.nn.Linear, torch.nn.LayerNorm}, 
+                dtype=torch.qint8
             )
             
-            # Optimize with TorchScript
-            model = torch.jit.script(model)
-            model = torch.jit.optimize_for_inference(model)
+            # Convert to TorchScript with optimization
+            with torch.jit.optimized_execution(True):
+                model = torch.jit.script(model)
+                model = torch.jit.optimize_for_inference(model)
             
             self.model = model
             logger.info("Model loaded successfully")
@@ -139,6 +182,9 @@ class ModelManager:
             
             logger.info("Initializing model manager...")
             
+            # Set memory limits
+            limit_memory()
+            
             # Add tokenizer to safe globals
             torch.serialization.add_safe_globals([XLMRobertaTokenizer])
             
@@ -148,11 +194,12 @@ class ModelManager:
             # Load model in chunks
             self.load_model_in_chunks(MODEL_PATH)
             
-            # Load tokenizer
+            # Load tokenizer with minimal memory
             self.tokenizer = XLMRobertaTokenizer.from_pretrained(
                 "xlm-roberta-base",
                 local_files_only=True,
-                low_cpu_mem_usage=True
+                low_cpu_mem_usage=True,
+                do_lower_case=False
             )
             
             self.is_initialized = True
@@ -168,26 +215,31 @@ class ModelManager:
             if not self.is_initialized:
                 self.initialize()
                 
-            # Tokenize with memory optimization
+            # Tokenize with minimal memory
             inputs = self.tokenizer(
                 text,
                 return_tensors="pt",
                 truncation=True,
                 max_length=128,
-                padding=True
+                padding=True,
+                add_special_tokens=True
             )
             
-            # Get prediction
+            # Get prediction with minimal memory
             with torch.no_grad():
                 outputs = self.model(**inputs)
-                predictions = torch.nn.functional.softmax(outputs.logits, dim=-1)
+                if isinstance(outputs, tuple):
+                    logits = outputs[0]
+                else:
+                    logits = outputs.logits
                 
+                predictions = torch.nn.functional.softmax(logits, dim=-1)
                 predicted_idx = predictions.argmax().item()
                 predicted_label = self.sentiment_labels[predicted_idx]
                 confidence = float(predictions.max().item())
                 
                 # Clean up
-                del outputs, predictions, inputs
+                del outputs, predictions, inputs, logits
                 self.optimize_memory()
                 
                 return {
@@ -205,17 +257,22 @@ class ModelManager:
 # Initialize model manager
 model_manager = ModelManager()
 
-# Initialize FastAPI app
+# Initialize FastAPI app with minimal settings
 app = FastAPI(
     title="Marathi Sentiment Analysis API",
-    description="API for analyzing sentiment in Marathi text with special handling for devotional content",
-    version="1.0.0"
+    description="API for analyzing sentiment in Marathi text",
+    version="1.0.0",
+    docs_url=None,  # Disable Swagger UI to save memory
+    redoc_url=None  # Disable ReDoc to save memory
 )
 
 @app.on_event("startup")
 async def startup_event():
     """Initialize the model manager on startup"""
     try:
+        # Set process priority to low
+        os.nice(19)
+        # Initialize model manager
         model_manager.initialize()
     except Exception as e:
         logger.error(f"Failed to initialize on startup: {e}")
