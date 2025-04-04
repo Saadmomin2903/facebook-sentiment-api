@@ -1,0 +1,78 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+logs/
+log/
+
+# Local config files
+.env
+.env.local
+.env.*.local
+
+# ML model files (these should be managed separately due to size)
+*.pth
+*.pkl
+*.h5
+models/
+
+# Facebook login screenshots and debug files
+login_error.png
+debug/
+screenshots/
+
+# Render specific
+.render/
+
+# Docker
+.docker/
+.dockerignore
+
+# Test files
+test_results/
+test_data/
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# Dependency files that should be generated
+package-lock.json
+yarn.lock
+Pipfile.lock
+
+# System files
+.DS_Store
+Thumbs.db 

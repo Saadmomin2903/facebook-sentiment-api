@@ -1,0 +1,16 @@
+version: '3'
+
+services:
+  facebook-sentiment-api:
+    build: .
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./best_marathi_sentiment_model.pth:/app/models/best_marathi_sentiment_model.pth
+    environment:
+      - MODEL_PATH=/app/models/best_marathi_sentiment_model.pth
+      # Store your credentials as environment variables in production
+      # - FB_EMAIL=your_email@example.com
+      # - FB_PASSWORD=your_password
+      # - API_KEY=your-secure-api-key
+    restart: always 

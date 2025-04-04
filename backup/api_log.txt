@@ -1,0 +1,65 @@
+INFO:     Started server process [37240]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+Traceback (most recent call last):
+  File "/Users/saadmomin/Desktop/mlpf/combined_api.py", line 107, in login
+    await self.page.wait_for_load_state('networkidle', timeout=60000)
+  File "/Users/saadmomin/Desktop/mlpf/venv/lib/python3.11/site-packages/playwright/async_api/_generated.py", line 9083, in wait_for_load_state
+    await self._impl_obj.wait_for_load_state(state=state, timeout=timeout)
+  File "/Users/saadmomin/Desktop/mlpf/venv/lib/python3.11/site-packages/playwright/_impl/_page.py", line 568, in wait_for_load_state
+    return await self._main_frame.wait_for_load_state(**locals_to_params(locals()))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saadmomin/Desktop/mlpf/venv/lib/python3.11/site-packages/playwright/_impl/_frame.py", line 243, in wait_for_load_state
+    return await self._wait_for_load_state_impl(state, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saadmomin/Desktop/mlpf/venv/lib/python3.11/site-packages/playwright/_impl/_frame.py", line 271, in _wait_for_load_state_impl
+    await waiter.result()
+playwright._impl._errors.TimeoutError: Timeout 60000ms exceeded.
+=========================== logs ===========================
+"commit" event fired
+"domcontentloaded" event fired
+"load" event fired
+============================================================
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/saadmomin/Desktop/mlpf/combined_api.py", line 277, in analyze_post_sentiment
+    await scraper.login(FB_EMAIL, FB_PASSWORD)
+  File "/Users/saadmomin/Desktop/mlpf/combined_api.py", line 127, in login
+    raise HTTPException(status_code=401, detail=f"Login failed: {str(e)}")
+fastapi.exceptions.HTTPException: 401: Login failed: Timeout 60000ms exceeded.
+=========================== logs ===========================
+"commit" event fired
+"domcontentloaded" event fired
+"load" event fired
+============================================================
+Using device: cpu
+Model loaded successfully from best_marathi_sentiment_model.pth
+Label mapping: {-1: 0, 0: 1, 1: 2}
+Readable mapping: {-1: 'Negative', 0: 'Neutral', 1: 'Positive'}
+Tokenizer loaded
+Initializing scraper for sentiment analysis...
+Logging in with predefined credentials...
+Navigating to Facebook...
+Facebook loaded
+Looking for cookie consent button...
+Filling login credentials...
+Clicking login button...
+Waiting for navigation...
+Login error: Timeout 60000ms exceeded.
+=========================== logs ===========================
+"commit" event fired
+"domcontentloaded" event fired
+"load" event fired
+============================================================
+Screenshot saved to login_error.png
+Error in sentiment analysis endpoint: 401: Login failed: Timeout 60000ms exceeded.
+=========================== logs ===========================
+"commit" event fired
+"domcontentloaded" event fired
+"load" event fired
+============================================================
+Closing scraper
+INFO:     127.0.0.1:55474 - "POST /analyze-post-sentiment HTTP/1.1" 500 Internal Server Error
