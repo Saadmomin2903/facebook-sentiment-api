@@ -9,7 +9,6 @@ from datetime import datetime
 import uvicorn
 import logging
 import os
-import gc
 from dotenv import load_dotenv
 import torch
 from transformers import XLMRobertaTokenizer, XLMRobertaForSequenceClassification
@@ -39,70 +38,53 @@ MODEL_PATH = os.environ.get("MODEL_PATH", "best_marathi_sentiment_model.pth")
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", 8002))
 
-# Global variables for model and tokenizer
-model = None
-tokenizer = None
-sentiment_labels = {0: 'Negative', 1: 'Neutral', 2: 'Positive'}
-
-# Lazy loader for model and tokenizer
-async def get_model_and_tokenizer():
-    global model, tokenizer
+# Initialize sentiment analyzer
+try:
+    # Add XLMRobertaTokenizer to safe globals
+    torch.serialization.add_safe_globals([XLMRobertaTokenizer])
     
-    # Only load if not already loaded
-    if model is None or tokenizer is None:
-        try:
-            logger.info("Loading sentiment model on demand...")
-            
-            # Load the model with memory optimizations
-            model = XLMRobertaForSequenceClassification.from_pretrained(
-                "xlm-roberta-base", 
-                num_labels=3,
-                torchscript=True,
-                low_cpu_mem_usage=True
-            )
-            model.eval()
-            
-            # Load the state dict
-            logger.info(f"Loading model weights from {MODEL_PATH}")
-            checkpoint = torch.load(MODEL_PATH, map_location="cpu")
-            
-            # Extract state dict
-            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                state_dict = checkpoint['model_state_dict']
-            else:
-                state_dict = checkpoint
-                
-            # Remove position_ids if it exists
-            if 'roberta.embeddings.position_ids' in state_dict:
-                del state_dict['roberta.embeddings.position_ids']
-                
-            # Load state dict with strict=False to ignore missing keys
-            model.load_state_dict(state_dict, strict=False)
-            
-            # Apply quantization to reduce memory usage
-            logger.info("Applying dynamic quantization to model")
-            try:
-                # Try quantizing the model to int8
-                from torch.quantization import quantize_dynamic
-                model = quantize_dynamic(model, {torch.nn.Linear}, dtype=torch.qint8)
-                logger.info("Model successfully quantized")
-            except Exception as e:
-                logger.warning(f"Quantization failed, using full precision model: {e}")
-            
-            # Load tokenizer
-            logger.info("Loading tokenizer")
-            tokenizer = XLMRobertaTokenizer.from_pretrained("xlm-roberta-base")
-            
-            # Force garbage collection
-            gc.collect()
-            torch.cuda.empty_cache() if torch.cuda.is_available() else None
-            
-            logger.info("Model and tokenizer loaded successfully")
-        except Exception as e:
-            logger.error(f"Failed to load model: {e}")
-            raise
+    # Load your trained model and tokenizer with memory optimizations
+    device = torch.device('cpu')
+    checkpoint = torch.load(MODEL_PATH, map_location=device, weights_only=True)
     
-    return model, tokenizer
+    # Load the model with memory optimizations
+    model = XLMRobertaForSequenceClassification.from_pretrained(
+        "xlm-roberta-base",
+        num_labels=3,
+        torchscript=True,
+        low_cpu_mem_usage=True
+    )
+    model.eval()  # Set to evaluation mode
+    
+    # Load state dict and handle missing keys
+    state_dict = checkpoint['model_state_dict']
+    # Remove position_ids from state_dict if it exists
+    if 'roberta.embeddings.position_ids' in state_dict:
+        del state_dict['roberta.embeddings.position_ids']
+    model.load_state_dict(state_dict, strict=False)
+    
+    # Optimize model for inference
+    model = torch.jit.optimize_for_inference(torch.jit.script(model))
+    
+    # Load fresh tokenizer with memory optimization
+    tokenizer = XLMRobertaTokenizer.from_pretrained(
+        "xlm-roberta-base",
+        local_files_only=True,
+        low_cpu_mem_usage=True
+    )
+    
+    # Convert label mapping to sentiment labels
+    sentiment_labels = {0: 'Negative', 1: 'Neutral', 2: 'Positive'}
+    
+    # Clear some memory
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+    logger.info("Sentiment analyzer initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize sentiment analyzer: {e}")
+    raise
 
 # Dictionary of test sentences with known sentiments for validation
 TEST_SENTENCES = {
@@ -173,24 +155,16 @@ class FacebookScraper:
 
     async def initialize(self):
         self.playwright = await async_playwright().start()
-        # Use minimal browser settings to reduce memory usage
         self.browser = await self.playwright.chromium.launch(
             headless=True,
             args=[
                 '--disable-notifications',
                 '--disable-dev-shm-usage',
-                '--no-sandbox',
-                '--disable-gpu',
-                '--disable-extensions',
-                '--disable-software-rasterizer',
-                '--disable-default-apps',
-                '--mute-audio',
-                '--no-zygote',
-                '--single-process'
+                '--no-sandbox'
             ]
         )
         self.context = await self.browser.new_context(
-            viewport={'width': 1280, 'height': 720},  # Smaller viewport
+            viewport={'width': 1920, 'height': 1080},
             user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
         )
         self.page = await self.context.new_page()
@@ -247,8 +221,7 @@ class FacebookScraper:
 
     async def expand_all_comments(self):
         try:
-            # Limit to fewer expansion attempts to save memory
-            for _ in range(5):  # Reduced from 10 to 5
+            for _ in range(10):  # Try expanding 10 times maximum
                 try:
                     # Click "View more comments" buttons
                     more_buttons = await self.page.query_selector_all('div[role="button"]')
@@ -283,7 +256,7 @@ class FacebookScraper:
             logger.info("Post page loaded")
             await self.page.wait_for_load_state('networkidle', timeout=60000)
             logger.info("Network idle")
-            await asyncio.sleep(5)  # Reduced from 10 to 5
+            await asyncio.sleep(10)
             
             logger.info("Extracting post content...")
 
@@ -321,10 +294,7 @@ class FacebookScraper:
                 const comments = [];
                 const commentElements = Array.from(document.querySelectorAll('div[role="article"]'));
                 
-                // Limit comments to reduce memory usage
-                const limitedComments = commentElements.slice(0, 50);
-                
-                limitedComments.forEach(comment => {
+                commentElements.forEach(comment => {
                     try {
                         const contentElement = comment.querySelector('div[dir="auto"]:not([style*="display: none"])');
                         if (!contentElement) return;
@@ -376,9 +346,6 @@ class FacebookScraper:
             await self.browser.close()
         if self.playwright:
             await self.playwright.stop()
-        
-        # Force garbage collection
-        gc.collect()
 
 @app.post("/scrape-post")
 async def scrape_facebook_post(credentials: FacebookCredentials):
@@ -409,44 +376,35 @@ async def analyze_post_sentiment(request: PostUrlRequest):
         
         # Analyze the sentiment of each comment
         comments_with_sentiment = []
-        
-        # Process comments in batches to reduce memory usage
-        batch_size = 10
-        for i in range(0, len(post_data['comments']), batch_size):
-            batch = post_data['comments'][i:i+batch_size]
-            
-            for j, comment in enumerate(batch):
-                # Only analyze if the comment has content
-                if 'comment' in comment and comment['comment']:
-                    logger.info(f"Analyzing comment {i+j+1}/{len(post_data['comments'])}: {comment['comment'][:50]}...")
-                    try:
-                        # Perform sentiment analysis
-                        sentiment_result = await analyze_sentiment_text(comment['comment'])
-                        
-                        # Create a CommentSentiment object
-                        comment_sentiment = {
-                            'author': comment.get('author', 'Unknown'),
-                            'comment': comment['comment'],
-                            'time': comment.get('time', ''),
-                            'sentiment': sentiment_result['sentiment'],
-                            'confidence': sentiment_result['confidence']
-                        }
-                        comments_with_sentiment.append(comment_sentiment)
-                        logger.info(f"  Sentiment: {sentiment_result['sentiment']}, Confidence: {sentiment_result['confidence']:.2f}")
-                    except Exception as e:
-                        logger.error(f"Error analyzing comment: {str(e)}")
-                        # Still include the comment but with error sentiment
-                        comment_sentiment = {
-                            'author': comment.get('author', 'Unknown'),
-                            'comment': comment['comment'],
-                            'time': comment.get('time', ''),
-                            'sentiment': 'Error',
-                            'confidence': 0.0
-                        }
-                        comments_with_sentiment.append(comment_sentiment)
-            
-            # Force garbage collection after each batch
-            gc.collect()
+        for i, comment in enumerate(post_data['comments']):
+            # Only analyze if the comment has content
+            if 'comment' in comment and comment['comment']:
+                logger.info(f"Analyzing comment {i+1}/{len(post_data['comments'])}: {comment['comment'][:50]}...")
+                try:
+                    # Perform sentiment analysis
+                    sentiment_result = await analyze_sentiment_text(comment['comment'])
+                    
+                    # Create a CommentSentiment object
+                    comment_sentiment = {
+                        'author': comment.get('author', 'Unknown'),
+                        'comment': comment['comment'],
+                        'time': comment.get('time', ''),
+                        'sentiment': sentiment_result['sentiment'],
+                        'confidence': sentiment_result['confidence']
+                    }
+                    comments_with_sentiment.append(comment_sentiment)
+                    logger.info(f"  Sentiment: {sentiment_result['sentiment']}, Confidence: {sentiment_result['confidence']:.2f}")
+                except Exception as e:
+                    logger.error(f"Error analyzing comment: {str(e)}")
+                    # Still include the comment but with error sentiment
+                    comment_sentiment = {
+                        'author': comment.get('author', 'Unknown'),
+                        'comment': comment['comment'],
+                        'time': comment.get('time', ''),
+                        'sentiment': 'Error',
+                        'confidence': 0.0
+                    }
+                    comments_with_sentiment.append(comment_sentiment)
         
         # Prepare the response
         logger.info(f"Preparing response with {len(comments_with_sentiment)} analyzed comments")
@@ -486,37 +444,28 @@ async def analyze_fb_post(url: str):
         
         # Analyze only the comments
         analyzed_comments = []
-        
-        # Process comments in batches to reduce memory usage
-        batch_size = 10
-        for i in range(0, len(post_data['comments']), batch_size):
-            batch = post_data['comments'][i:i+batch_size]
-            
-            for comment in batch:
-                try:
-                    # Only analyze the comment text if it exists
-                    if 'comment' in comment and comment['comment']:
-                        logger.info(f"Analyzing comment: {comment['comment'][:50]}...")
-                        sentiment_result = await analyze_sentiment_text(comment['comment'])
-                        analyzed_comments.append({
-                            "author": comment['author'],
-                            "comment": comment['comment'],
-                            "time": comment['time'],
-                            "sentiment": sentiment_result["sentiment"],
-                            "confidence": sentiment_result["confidence"]
-                        })
-                except Exception as e:
-                    logger.error(f"Error analyzing comment: {str(e)}")
+        for comment in post_data['comments']:
+            try:
+                # Only analyze the comment text if it exists
+                if 'comment' in comment and comment['comment']:
+                    logger.info(f"Analyzing comment: {comment['comment'][:50]}...")
+                    sentiment_result = await analyze_sentiment_text(comment['comment'])
                     analyzed_comments.append({
                         "author": comment['author'],
                         "comment": comment['comment'],
                         "time": comment['time'],
-                        "sentiment": "Error",
-                        "confidence": 0.0
+                        "sentiment": sentiment_result["sentiment"],
+                        "confidence": sentiment_result["confidence"]
                     })
-            
-            # Force garbage collection after each batch
-            gc.collect()
+            except Exception as e:
+                logger.error(f"Error analyzing comment: {str(e)}")
+                analyzed_comments.append({
+                    "author": comment['author'],
+                    "comment": comment['comment'],
+                    "time": comment['time'],
+                    "sentiment": "Error",
+                    "confidence": 0.0
+                })
         
         # Calculate sentiment distribution
         sentiment_counts = {"Positive": 0, "Negative": 0, "Neutral": 0, "Error": 0}
@@ -564,11 +513,8 @@ async def test_sentiment():
     """Test endpoint to verify the sentiment model is working correctly"""
     results = []
     
-    # Test only a subset of samples to reduce memory usage
-    sample_items = list(TEST_SENTENCES.items())[:3]
-    
     # Test each sample
-    for text, expected in sample_items:
+    for text, expected in TEST_SENTENCES.items():
         result = await analyze_sentiment_text(text)
         results.append({
             "text": text,
@@ -600,11 +546,8 @@ async def root():
 async def analyze_sentiment_text(text: str) -> dict:
     """Analyze the sentiment of a given text."""
     try:
-        # Get model and tokenizer
-        model, tokenizer = await get_model_and_tokenizer()
-        
-        # Tokenize input with reduced max length
-        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=256)
+        # Tokenize input
+        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
         
         # Get prediction
         with torch.no_grad():
@@ -619,7 +562,7 @@ async def analyze_sentiment_text(text: str) -> dict:
             logger.info(f"Analyzed text: '{text[:50]}...' -> {predicted_label} ({confidence:.2f})")
             
             return {
-                "sentiment": predicted_label,
+                "sentiment": predicted_label,  # Already capitalized from sentiment_labels
                 "confidence": confidence
             }
     except Exception as e:
@@ -641,24 +584,12 @@ async def analyze_sentiment(request: SentimentRequest):
 async def analyze_batch_sentiment(request: BatchSentimentRequest):
     try:
         results = []
-        # Process in smaller batches to conserve memory
-        batch_size = 5
-        for i in range(0, len(request.texts), batch_size):
-            batch = request.texts[i:i+batch_size]
-            batch_results = []
-            
-            for text in batch:
-                result = await analyze_sentiment_text(text)
-                batch_results.append(SentimentResponse(**result))
-                
-            results.extend(batch_results)
-            # Force garbage collection after each batch
-            gc.collect()
-            
+        for text in request.texts:
+            result = await analyze_sentiment_text(text)
+            results.append(SentimentResponse(**result))
         return BatchSentimentResponse(results=results)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    # Use single worker to reduce memory usage
-    uvicorn.run(app, host=HOST, port=PORT, workers=1)
+    uvicorn.run(app, host=HOST, port=PORT) 

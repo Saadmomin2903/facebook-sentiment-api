@@ -1,27 +1,28 @@
 #!/bin/bash
 
-MODEL_DIR="/app/models"
-MODEL_PATH="${MODEL_DIR}/best_marathi_sentiment_model.pth"
-MODEL_URL="${MODEL_URL:-https://github.com/Saadmomin2903/facebook-sentiment-api/releases/download/v1.0.0/best_marathi_sentiment_model.pth}"
+# Create models directory if it doesn't exist
+mkdir -p /app/models
 
-# Check if model already exists
-if [ -f "$MODEL_PATH" ]; then
-    echo "Model already exists at $MODEL_PATH"
-    exit 0
-fi
-
-# Create directory if it doesn't exist
-mkdir -p "$MODEL_DIR"
-
-# Download model in chunks to reduce memory consumption
-echo "Downloading model to $MODEL_PATH from $MODEL_URL"
-wget -q --show-progress --progress=bar:force --tries=3 --waitretry=5 \
-    --limit-rate=10M \
-    --content-disposition \
-    -O "$MODEL_PATH" \
-    "$MODEL_URL" || {
-    echo "Failed to download model!"
-    exit 1
-}
-
-echo "Model downloaded successfully."
+# Check if model file exists
+if [ ! -f "/app/models/best_marathi_sentiment_model.pth" ]; then
+    echo "Model file not found. Please provide a URL to download the model file."
+    echo "You can set the MODEL_URL environment variable to specify the download URL."
+    
+    if [ -z "$MODEL_URL" ]; then
+        echo "Error: MODEL_URL environment variable is not set."
+        echo "Please set MODEL_URL to the URL where your model file can be downloaded."
+        exit 1
+    fi
+    
+    echo "Downloading model from $MODEL_URL..."
+    wget -O /app/models/best_marathi_sentiment_model.pth "$MODEL_URL"
+    
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to download the model file."
+        exit 1
+    fi
+    
+    echo "Model downloaded successfully."
+else
+    echo "Model file already exists."
+fi 
