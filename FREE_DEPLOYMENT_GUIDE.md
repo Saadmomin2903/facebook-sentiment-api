@@ -69,27 +69,59 @@ If the blueprint approach doesn't work, you can set up manually:
 
 Since the free tier doesn't support persistent disks, we need to handle the model file differently. Here are your options:
 
-### Option A: Download the Model During Container Startup
+### Option A: Host Your Model File (Easiest Methods)
 
-1. Create a script to download the model during container startup:
+Choose one of these simple methods to host your model file:
 
-```bash
-#!/bin/bash
-# download_model.sh
-if [ ! -f "/app/models/best_marathi_sentiment_model.pth" ]; then
-    echo "Downloading model file..."
-    # Add your model download command here
-    # Example: wget -O /app/models/best_marathi_sentiment_model.pth https://your-model-url
-fi
-```
+#### Method 1: GitHub Releases (Recommended)
 
-2. Make the script executable:
+1. Install GitHub CLI if you haven't already:
 
-```bash
-chmod +x download_model.sh
-```
+   ```bash
+   # macOS
+   brew install gh
 
-3. Modify your Dockerfile to run this script before starting the application.
+   # Windows
+   winget install GitHub.cli
+
+   # Linux
+   sudo apt install gh
+   ```
+
+2. Log in to GitHub:
+
+   ```bash
+   gh auth login
+   ```
+
+3. Run the upload script:
+
+   ```bash
+   chmod +x upload_to_github_release.sh
+   ./upload_to_github_release.sh
+   ```
+
+4. Set the `MODEL_URL` in your Render dashboard to the URL provided by the script.
+
+#### Method 2: Google Drive
+
+1. Upload your model file to Google Drive
+2. Right-click the file and select "Share"
+3. Change sharing to "Anyone with the link"
+4. Get the shareable link
+5. Modify the link to force download by changing it to:
+   ```
+   https://drive.google.com/uc?export=download&id=YOUR_FILE_ID
+   ```
+   (Replace YOUR_FILE_ID with the ID from your shareable link)
+6. Set this modified URL as your `MODEL_URL`
+
+#### Method 3: Dropbox
+
+1. Upload your model file to Dropbox
+2. Create a shareable link
+3. Modify the link by changing `dl=0` to `dl=1` at the end
+4. Set this modified URL as your `MODEL_URL`
 
 ### Option B: Use a Smaller Model
 
