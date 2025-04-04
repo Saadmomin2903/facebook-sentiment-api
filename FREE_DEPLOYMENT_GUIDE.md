@@ -67,33 +67,41 @@ If the blueprint approach doesn't work, you can set up manually:
 
 ## Step 3: Handle Your Model File
 
-Since the free tier doesn't support persistent disks, we need to include the model file in the Docker image. Here's how:
+Since the free tier doesn't support persistent disks, we need to handle the model file differently. Here are your options:
 
-1. Create a `models` directory in your project:
+### Option A: Download the Model During Container Startup
 
-   ```bash
-   mkdir models
-   ```
+1. Create a script to download the model during container startup:
 
-2. Copy your model file to the models directory:
+```bash
+#!/bin/bash
+# download_model.sh
+if [ ! -f "/app/models/best_marathi_sentiment_model.pth" ]; then
+    echo "Downloading model file..."
+    # Add your model download command here
+    # Example: wget -O /app/models/best_marathi_sentiment_model.pth https://your-model-url
+fi
+```
 
-   ```bash
-   cp best_marathi_sentiment_model.pth models/
-   ```
+2. Make the script executable:
 
-3. Make sure your Dockerfile includes the model file in the build:
+```bash
+chmod +x download_model.sh
+```
 
-   ```dockerfile
-   # In your Dockerfile
-   COPY models/best_marathi_sentiment_model.pth /app/models/
-   ```
+3. Modify your Dockerfile to run this script before starting the application.
 
-4. Commit and push these changes to GitHub:
-   ```bash
-   git add models/
-   git commit -m "Add model file to repository"
-   git push
-   ```
+### Option B: Use a Smaller Model
+
+1. Consider using a quantized or smaller version of your model
+2. This will help with the memory constraints of the free tier
+
+### Option C: Upgrade to a Paid Plan
+
+If you need the full model:
+
+1. Upgrade to a paid plan that supports persistent disks
+2. Follow the original deployment guide with persistent storage
 
 ## Step 4: Verify Deployment
 
@@ -124,7 +132,7 @@ Be aware of these limitations:
 
 4. **Usage Limits**: The free tier includes 750 hours of usage per month.
 
-5. **No Persistent Storage**: The free tier doesn't support persistent disks, so we need to include the model file in the Docker image.
+5. **No Persistent Storage**: The free tier doesn't support persistent disks, so we need to handle the model file differently.
 
 ## Troubleshooting
 

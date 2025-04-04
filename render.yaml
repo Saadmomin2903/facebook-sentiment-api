@@ -8,6 +8,8 @@ services:
         value: 10000
       - key: MODEL_PATH
         value: /app/models/best_marathi_sentiment_model.pth
+      - key: MODEL_URL
+        sync: false
       - key: FB_EMAIL
         sync: false
       - key: FB_PASSWORD

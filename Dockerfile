@@ -36,13 +36,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Create directory for models
 RUN mkdir -p /app/models
 
-# Copy application code and model file
+# Copy application code and scripts
 COPY . .
-COPY models/best_marathi_sentiment_model.pth /app/models/
+COPY download_model.sh /app/
+RUN chmod +x /app/download_model.sh
 
 # Default env variables (can be overridden)
 ENV PORT=10000
 ENV MODEL_PATH=/app/models/best_marathi_sentiment_model.pth
 
-# Run the application
-CMD uvicorn api:app --host 0.0.0.0 --port $PORT 
+# Run the download script and then start the application
+CMD /app/download_model.sh && uvicorn api:app --host 0.0.0.0 --port $PORT 
