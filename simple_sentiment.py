@@ -1,12 +1,11 @@
 import torch
-import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModel
-from torch.serialization import safe_globals
-from transformers.models.xlm_roberta.tokenization_xlm_roberta import XLMRobertaTokenizer
 import torch.nn as nn
+from transformers import AutoTokenizer, AutoModel
+import numpy as np
+from typing import Dict, List, Tuple
 
 class SimpleSentimentAnalyzer:
-    def __init__(self, model_path):
+    def __init__(self, model_path: str):
         """
         A simplified sentiment analyzer that loads a pre-trained model
         and provides predictions for Marathi text.
@@ -14,92 +13,55 @@ class SimpleSentimentAnalyzer:
         Args:
             model_path (str): Path to the model file
         """
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using device: {self.device}")
         
         # Load model
         try:
-            with safe_globals([XLMRobertaTokenizer]):
-                checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
-            print(f"Model loaded successfully from {model_path}")
-            
-            # Get the label mapping
-            self.label_mapping = checkpoint.get('label_mapping', {0: "Negative", 1: "Neutral", 2: "Positive"})
-            print(f"Label mapping: {self.label_mapping}")
-            
-            # Create a human-readable mapping
-            self.readable_mapping = {}
-            # Default mapping if label_mapping is not in expected format
-            if all(isinstance(k, (int, float)) for k in self.label_mapping.keys()):
-                # If keys are already numeric, use them directly
-                self.readable_mapping = {
-                    k: "Negative" if v == 0 else "Neutral" if v == 1 else "Positive" 
-                    for k, v in self.label_mapping.items()
-                }
-            else:
-                # If keys are not numeric, map values to sentiment labels
-                reverse_map = {v: k for k, v in self.label_mapping.items()}
-                self.readable_mapping = {
-                    0: "Negative" if 0 in reverse_map else "Class 0",
-                    1: "Neutral" if 1 in reverse_map else "Class 1",
-                    2: "Positive" if 2 in reverse_map else "Class 2" 
-                }
-            
-            print(f"Readable mapping: {self.readable_mapping}")
+            self.model = self._load_model(model_path)
+            print("Model loaded successfully")
             
             # Load tokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained("xlm-roberta-base")
+            self.tokenizer = AutoTokenizer.from_pretrained("ai4bharat/indic-bert")
             print("Tokenizer loaded")
             
+            self.model.eval()
         except Exception as e:
             print(f"Error loading model: {e}")
             raise
     
-    @torch.no_grad()
-    def predict(self, text):
-        """
-        Predict sentiment for a given text
-        
-        Args:
-            text (str): Input text for sentiment analysis
+    def _load_model(self, model_path: str) -> nn.Module:
+        """Load the PyTorch model from the given path."""
+        try:
+            # Try loading with map_location to handle CPU/GPU compatibility
+            model = torch.load(model_path, map_location=self.device)
+            return model
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            raise
+    
+    def predict(self, text: str) -> Tuple[str, float]:
+        """Predict sentiment for a single text."""
+        try:
+            inputs = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
             
-        Returns:
-            dict: Prediction results including sentiment and confidence
-        """
-        # Tokenize the input
-        inputs = self.tokenizer(
-            text,
-            max_length=128,
-            padding='max_length',
-            truncation=True,
-            return_tensors='pt'
-        )
-        
-        # Move to device
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        
-        # For this simplified version, we'll assign sentiment based on keywords
-        # since we don't have the model architecture that matches the saved weights
-        
-        # Some basic keyword-based rules (very simplistic)
-        if any(word in text.lower() for word in ['छान', 'आवडले', 'चांगले']):
-            class_id = 1  # Positive
-            confidence = 0.92
-        elif any(word in text.lower() for word in ['वाईट', 'नाही', 'दु:खद', 'नापास']):
-            class_id = -1  # Negative
-            confidence = 0.85
-        else:
-            class_id = 0  # Neutral
-            confidence = 0.75
-        
-        result = {
-            'text': text,
-            'sentiment': self.readable_mapping.get(class_id, f"Class {class_id}"),
-            'sentiment_id': class_id,
-            'confidence': confidence
-        }
-        
-        return result
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                logits = outputs.logits
+                probabilities = torch.softmax(logits, dim=1)
+                predicted_class = torch.argmax(probabilities, dim=1).item()
+                confidence = probabilities[0][predicted_class].item()
+            
+            sentiment_map = {0: "negative", 1: "neutral", 2: "positive"}
+            return sentiment_map[predicted_class], confidence
+        except Exception as e:
+            print(f"Error in prediction: {e}")
+            return "error", 0.0
+
+    def predict_batch(self, texts: List[str]) -> List[Tuple[str, float]]:
+        """Predict sentiment for a batch of texts."""
+        return [self.predict(text) for text in texts]
 
 
 # Example usage
@@ -120,5 +82,5 @@ if __name__ == "__main__":
     for sentence in sentences:
         result = analyzer.predict(sentence)
         print("\n" + "="*50)
-        print(f"Text: {result['text']}")
-        print(f"Sentiment: {result['sentiment']} (Confidence: {result['confidence']:.2f})") 
+        print(f"Text: {sentence}")
+        print(f"Sentiment: {result[0]} (Confidence: {result[1]:.2f})") 

@@ -1,77 +1,95 @@
 from simple_sentiment import SimpleSentimentAnalyzer
+from typing import Tuple, List, Dict
+import re
 
 class CustomMarathiSentimentAnalyzer:
     """
     A custom sentiment analyzer that extends the SimpleSentimentAnalyzer with special
     handling for religious and devotional phrases.
     """
-    def __init__(self, model_path):
+    def __init__(self, model_path: str):
         # Initialize the base sentiment analyzer
         self.base_analyzer = SimpleSentimentAnalyzer(model_path)
         
-        # Dictionary of religious/devotional phrases to consider positive
-        self.devotional_phrases = {
-            "जय": True,         # Jai
-            "माता": True,       # Mata
-            "माते": True,       # Mate
-            "दी": True,         # Di
-            "श्री": True,       # Shri
-            "जगदंब": True,      # Jagdamb
-            "अंबाबाई": True,    # Ambabai
-            "देवी": True,       # Devi
-            "नमो": True,        # Namo
-            "प्रणाम": True,     # Pranam
-            "शुभ": True,        # Shubh
-            "मंगल": True,       # Mangal
-            "आशीर्वाद": True,   # Aashirwad
-            "भगवान": True,      # Bhagwan
-            "कृपा": True,       # Krupa
-            "धन्य": True,       # Dhanya
-            "धन्यवाद": True,    # Dhanyawad
-            "पूजा": True,       # Pooja
-            "भक्ति": True,      # Bhakti
-            "आरती": True        # Aarti
-        }
+        # List of devotional keywords
+        self.devotional_keywords = [
+            r'जय.*माता',
+            r'जय.*दी',
+            r'श्री.*माता',
+            r'हर.*हर.*महादेव',
+            r'ओम.*नमः.*शिवाय',
+            r'जय.*शिव.*शंकर',
+            r'जय.*गणेश',
+            r'जय.*हनुमान',
+            r'राम.*राम',
+            r'हरि.*ओम',
+            r'जय.*भवानी',
+            r'जय.*अंबे',
+            r'जय.*दुर्गे',
+            r'जय.*काली',
+            r'जय.*लक्ष्मी',
+            r'जय.*सरस्वती',
+            r'जय.*विठ्ठल',
+            r'जय.*विठोबा',
+            r'जय.*पांडुरंग',
+            r'जय.*विठ्ठल.*रखुमाई',
+            r'जय.*शिव.*शंकर',
+            r'जय.*भोलेनाथ',
+            r'जय.*महाकाल',
+            r'जय.*महादेव',
+            r'जय.*शंकर',
+            r'जय.*पार्वती',
+            r'जय.*गौरी',
+            r'जय.*पार्वती.*पुत्र',
+            r'जय.*गणपती.*बाप्पा',
+            r'जय.*सिद्धिविनायक',
+            r'जय.*बालाजी',
+            r'जय.*वेंकटेश',
+            r'जय.*वेंकटेश्वर',
+            r'जय.*तिरुपति.*बालाजी',
+            r'जय.*शिरडी.*साई',
+            r'जय.*साई.*नाथ',
+            r'जय.*साई.*बाबा',
+            r'जय.*शिरडी.*वासी',
+            r'जय.*साई.*श्याम',
+            r'जय.*साई.*राम',
+            r'जय.*साई.*कृष्ण',
+            r'जय.*साई.*दत्त',
+            r'जय.*साई.*नाथ.*महाराज',
+            r'जय.*साई.*नाथ.*की',
+            r'जय.*साई.*नाथ.*जी',
+            r'जय.*साई.*नाथ.*महाराज.*की',
+            r'जय.*साई.*नाथ.*महाराज.*जी',
+            r'जय.*साई.*नाथ.*महाराज.*की.*जय',
+            r'जय.*साई.*नाथ.*महाराज.*जी.*की.*जय',
+            r'जय.*साई.*नाथ.*महाराज.*की.*जय.*जय.*जय',
+            r'जय.*साई.*नाथ.*महाराज.*जी.*की.*जय.*जय.*जय',
+            r'जय.*साई.*नाथ.*महाराज.*की.*जय.*जय.*जय.*जय',
+            r'जय.*साई.*नाथ.*महाराज.*जी.*की.*जय.*jय.*जय.*जय'
+        ]
     
-    def predict(self, text):
-        """
-        Predict sentiment of text, with special handling for devotional content.
+    def _contains_devotional_content(self, text: str) -> bool:
+        """Check if the text contains devotional content."""
+        text = text.lower()
+        for pattern in self.devotional_keywords:
+            if re.search(pattern, text, re.IGNORECASE):
+                return True
+        return False
+
+    def predict(self, text: str) -> Tuple[str, float]:
+        """Predict sentiment with special handling for devotional content."""
+        base_sentiment, base_confidence = self.base_analyzer.predict(text)
         
-        Args:
-            text: Input text to analyze
-            
-        Returns:
-            Dictionary with sentiment prediction and confidence
-        """
-        # First get the base prediction
-        result = self.base_analyzer.predict(text)
+        if base_sentiment == "neutral" and self._contains_devotional_content(text):
+            # If the base model predicts neutral and we detect devotional content,
+            # we override it to positive with high confidence
+            return "positive", 0.95
         
-        # Check if this contains devotional keywords and is currently marked as neutral
-        if result["sentiment"] == "Neutral":
-            # Count devotional terms in the text
-            devotional_count = 0
-            words = text.lower().split()
-            
-            for word in words:
-                cleaned_word = ''.join(c for c in word if c.isalnum())
-                if cleaned_word in self.devotional_phrases:
-                    devotional_count += 1
-            
-            # If there are devotional terms, change sentiment to positive
-            if devotional_count > 0:
-                # Calculate a new confidence based on density of devotional terms
-                devotional_density = devotional_count / max(1, len(words))
-                new_confidence = min(0.95, 0.75 + (devotional_density * 0.2))
-                
-                return {
-                    "text": text,
-                    "sentiment": "Positive",
-                    "confidence": new_confidence,
-                    "note": "Reclassified from Neutral due to devotional content"
-                }
-        
-        # Return the original result for non-neutral or non-devotional content
-        return result
+        return base_sentiment, base_confidence
+
+    def predict_batch(self, texts: List[str]) -> List[Tuple[str, float]]:
+        """Predict sentiment for a batch of texts."""
+        return [self.predict(text) for text in texts]
 
 
 if __name__ == "__main__":
@@ -103,10 +121,8 @@ if __name__ == "__main__":
     for comment in test_comments:
         result = analyzer.predict(comment)
         print(f"Text: {comment}")
-        print(f"Sentiment: {result['sentiment']}")
-        print(f"Confidence: {result['confidence']:.2f}")
-        if "note" in result:
-            print(f"Note: {result['note']}")
+        print(f"Sentiment: {result[0]}")
+        print(f"Confidence: {result[1]:.2f}")
         print("-"*60)
     
     # Now test the actual Facebook comments
@@ -115,10 +131,8 @@ if __name__ == "__main__":
     for comment in comments:
         result = analyzer.predict(comment)
         print(f"Text: {comment}")
-        print(f"Sentiment: {result['sentiment']}")
-        print(f"Confidence: {result['confidence']:.2f}")
-        if "note" in result:
-            print(f"Note: {result['note']}")
+        print(f"Sentiment: {result[0]}")
+        print(f"Confidence: {result[1]:.2f}")
         print("-"*60)
     
     print("\nCONCLUSION:")

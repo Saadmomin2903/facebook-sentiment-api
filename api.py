@@ -9,13 +9,21 @@ import uvicorn
 from custom_sentiment import CustomMarathiSentimentAnalyzer
 import logging
 import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, 
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Facebook Post Scraper and Sentiment Analysis API")
+app = FastAPI(
+    title="Marathi Sentiment Analysis API",
+    description="API for analyzing sentiment in Marathi text with special handling for devotional content",
+    version="1.0.0"
+)
 
 # Pre-defined Facebook credentials (from environment variables for security)
 FB_EMAIL = os.environ.get("FB_EMAIL", "saadmomin5555@gmail.com")
@@ -28,17 +36,13 @@ MODEL_PATH = os.environ.get("MODEL_PATH", "best_marathi_sentiment_model.pth")
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", 8002))
 
-# Add a simplified app description
-app.description = """
-### Facebook Post Scraper and Sentiment Analysis API
-
-This API provides tools to:
-1. Scrape Facebook posts and comments
-2. Analyze the sentiment of comments in Marathi with special handling for devotional content
-
-#### Quick Start:
-- Use `/analyze-fb-post?url=YOUR_FB_POST_URL` for a one-click analysis
-"""
+# Initialize sentiment analyzer
+try:
+    analyzer = CustomMarathiSentimentAnalyzer(MODEL_PATH)
+    logger.info("Sentiment analyzer initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize sentiment analyzer: {e}")
+    raise
 
 # Dictionary of test sentences with known sentiments for validation
 TEST_SENTENCES = {
@@ -51,32 +55,6 @@ TEST_SENTENCES = {
     "श्री अंबाबाई माते की जय": "Positive",          # Devotional phrase (should be positive)
     "जय माता दी": "Positive"                        # Devotional phrase (should be positive)
 }
-
-# Initialize sentiment analyzer here but we'll re-initialize it in the startup event
-sentiment_analyzer = None
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize the sentiment analyzer at startup and validate it with test sentences"""
-    global sentiment_analyzer
-    
-    logger.info(f"Initializing custom sentiment analyzer with model at: {MODEL_PATH}")
-    sentiment_analyzer = CustomMarathiSentimentAnalyzer(MODEL_PATH)
-    
-    # Validate the model with test sentences
-    logger.info("Validating sentiment model with test sentences...")
-    all_passed = True
-    for text, expected_sentiment in TEST_SENTENCES.items():
-        result = sentiment_analyzer.predict(text)
-        logger.info(f"Test: '{text}' → Expected: {expected_sentiment}, Got: {result['sentiment']} (Confidence: {result['confidence']:.2f})")
-        if result['sentiment'] != expected_sentiment:
-            logger.warning(f"❌ Test failed for '{text}': Expected {expected_sentiment}, got {result['sentiment']}")
-            all_passed = False
-    
-    if all_passed:
-        logger.info("✅ All sentiment validation tests passed!")
-    else:
-        logger.warning("⚠️ Some sentiment validation tests failed. Model may need recalibration.")
 
 class FacebookCredentials(BaseModel):
     email: str
@@ -112,6 +90,19 @@ class SentimentAnalysisResponse(BaseModel):
     post_info: dict
     comments_sentiment: List[CommentSentiment]
     metadata: dict
+
+class SentimentRequest(BaseModel):
+    text: str
+
+class BatchSentimentRequest(BaseModel):
+    texts: List[str]
+
+class SentimentResponse(BaseModel):
+    sentiment: str
+    confidence: float
+
+class BatchSentimentResponse(BaseModel):
+    results: List[SentimentResponse]
 
 class FacebookScraper:
     def __init__(self):
@@ -349,7 +340,7 @@ async def analyze_post_sentiment(request: PostUrlRequest):
                 logger.info(f"Analyzing comment {i+1}/{len(post_data['comments'])}: {comment['comment'][:50]}...")
                 try:
                     # Perform sentiment analysis
-                    sentiment_result = sentiment_analyzer.predict(comment['comment'])
+                    sentiment_result = analyzer.predict(comment['comment'])
                     
                     # Create a CommentSentiment object
                     comment_sentiment = {
@@ -428,7 +419,7 @@ async def analyze_fb_post(url: str):
         
         # First verify the model is working as expected with a test case
         test_text = "तुमचे काम खूप छान आहे!"  # "Your work is very nice!"
-        test_result = sentiment_analyzer.predict(test_text)
+        test_result = analyzer.predict(test_text)
         logger.info(f"Verification test: '{test_text}' → Got: {test_result['sentiment']} (Expected: Positive)")
         
         # No need to print label mapping
@@ -444,7 +435,7 @@ async def analyze_fb_post(url: str):
                     cleaned_text = comment_text.strip()
                     
                     # Analyze the comment's sentiment
-                    sentiment_result = sentiment_analyzer.predict(cleaned_text)
+                    sentiment_result = analyzer.predict(cleaned_text)
                     sentiment_label = sentiment_result['sentiment']
                     confidence = sentiment_result['confidence']
                     
@@ -519,7 +510,7 @@ async def test_sentiment():
     
     # Test each sample
     for text, expected in TEST_SENTENCES.items():
-        result = sentiment_analyzer.predict(text)
+        result = analyzer.predict(text)
         results.append({
             "text": text,
             "expected": expected,
@@ -538,6 +529,37 @@ async def test_sentiment():
         "total": len(results),
         "results": results
     }
+
+@app.get("/")
+async def root():
+    return {
+        "message": "Marathi Sentiment Analysis API",
+        "status": "operational",
+        "version": "1.0.0"
+    }
+
+@app.post("/analyze", response_model=SentimentResponse)
+async def analyze_sentiment(request: SentimentRequest):
+    try:
+        sentiment, confidence = analyzer.predict(request.text)
+        return SentimentResponse(sentiment=sentiment, confidence=confidence)
+    except Exception as e:
+        logger.error(f"Error analyzing sentiment: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/analyze-batch", response_model=BatchSentimentResponse)
+async def analyze_batch_sentiment(request: BatchSentimentRequest):
+    try:
+        results = analyzer.predict_batch(request.texts)
+        return BatchSentimentResponse(
+            results=[
+                SentimentResponse(sentiment=sentiment, confidence=confidence)
+                for sentiment, confidence in results
+            ]
+        )
+    except Exception as e:
+        logger.error(f"Error analyzing batch sentiment: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     uvicorn.run(app, host=HOST, port=PORT) 
