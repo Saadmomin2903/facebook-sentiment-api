@@ -55,8 +55,7 @@ If the blueprint approach doesn't work, you can set up manually:
    - **Plan**: Free
    - **Region**: Choose a region close to your users
    - **Branch**: main (or whatever your default branch is)
-   - **Build Command**: Leave blank (Docker will handle this)
-   - **Start Command**: `docker run -p 10000:10000 -v /var/lib/render/model-storage:/app/models -e MODEL_PATH=/app/models/best_marathi_sentiment_model.pth -e FB_EMAIL=$FB_EMAIL -e FB_PASSWORD=$FB_PASSWORD -e PORT=10000 $RENDER_IMAGE_NAME`
+   - **Build Command**: `docker build -t fb-sentiment-api .`
 5. Click "Advanced" and add the following environment variables:
 
    - `FB_EMAIL`: Your Facebook email
@@ -66,57 +65,37 @@ If the blueprint approach doesn't work, you can set up manually:
 
 6. Click "Create Web Service"
 
-## Step 3: Set Up Persistent Disk for Your Model
+## Step 3: Handle Your Model File
 
-The free tier of Render has a 1GB persistent disk limit, which is just enough for your model:
+Since the free tier doesn't support persistent disks, we need to include the model file in the Docker image. Here's how:
 
-1. From your service dashboard, go to the "Disks" tab
-2. Click "Create Disk"
-3. Configure the disk:
-   - **Name**: model-storage
-   - **Mount Path**: `/app/models`
-   - **Size**: 1GB (maximum for free tier)
-4. Click "Create"
-
-## Step 4: Upload Your Model to the Persistent Disk
-
-There are two ways to upload your model:
-
-### Option A: Using the Render CLI
-
-1. Install the Render CLI:
+1. Create a `models` directory in your project:
 
    ```bash
-   pip install render
+   mkdir models
    ```
 
-2. Log in to Render:
+2. Copy your model file to the models directory:
 
    ```bash
-   render login
+   cp best_marathi_sentiment_model.pth models/
    ```
 
-3. Make the upload script executable:
+3. Make sure your Dockerfile includes the model file in the build:
 
+   ```dockerfile
+   # In your Dockerfile
+   COPY models/best_marathi_sentiment_model.pth /app/models/
+   ```
+
+4. Commit and push these changes to GitHub:
    ```bash
-   chmod +x upload_model.sh
+   git add models/
+   git commit -m "Add model file to repository"
+   git push
    ```
 
-4. Run the upload script:
-   ```bash
-   ./upload_model.sh
-   ```
-   Follow the prompts to upload your model file.
-
-### Option B: Using SFTP (Alternative Method)
-
-1. From your service dashboard, go to the "Shell" tab
-2. Click "Connect via SFTP"
-3. Use the provided credentials to connect using an SFTP client like FileZilla
-4. Navigate to the `/var/lib/render/model-storage` directory
-5. Upload your `best_marathi_sentiment_model.pth` file
-
-## Step 5: Verify Deployment
+## Step 4: Verify Deployment
 
 1. Once deployment is complete, your service will be available at the URL provided by Render (usually `https://fb-sentiment-api.onrender.com`)
 2. Test the API by visiting the `/test-sentiment` endpoint:
@@ -144,6 +123,8 @@ Be aware of these limitations:
 3. **Spin-down**: Free services will "spin down" after 15 minutes of inactivity. The first request after inactivity will take longer as the service starts up again (this is called a "cold start").
 
 4. **Usage Limits**: The free tier includes 750 hours of usage per month.
+
+5. **No Persistent Storage**: The free tier doesn't support persistent disks, so we need to include the model file in the Docker image.
 
 ## Troubleshooting
 

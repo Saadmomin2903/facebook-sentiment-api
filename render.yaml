@@ -12,10 +12,5 @@ services:
         sync: false
       - key: FB_PASSWORD
         sync: false
-    disk:
-      name: model-storage
-      mountPath: /app/models
-      sizeGB: 1
     healthCheckPath: /test-sentiment
     buildCommand: docker build -t fb-sentiment-api .
-    startCommand: docker run -p 10000:10000 -v /var/lib/render/model-storage:/app/models -e MODEL_PATH=$MODEL_PATH -e FB_EMAIL=$FB_EMAIL -e FB_PASSWORD=$FB_PASSWORD -e PORT=10000 fb-sentiment-api

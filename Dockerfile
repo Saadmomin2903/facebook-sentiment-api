@@ -36,8 +36,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Create directory for models
 RUN mkdir -p /app/models
 
-# Copy application code
+# Copy application code and model file
 COPY . .
+COPY models/best_marathi_sentiment_model.pth /app/models/
 
 # Default env variables (can be overridden)
 ENV PORT=10000
