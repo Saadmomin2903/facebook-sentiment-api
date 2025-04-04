@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y \
     libxi6 \
     libgconf-2-4 \
     default-jdk \
+    build-essential \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
@@ -45,11 +46,12 @@ RUN CHROME_DRIVER_VERSION="114.0.5735.90" \
 # Copy requirements first
 COPY requirements.txt .
 
-# Install dependencies
-RUN pip install --no-cache-dir -r requirements.txt \
-    && find /usr/local/lib/python3.9/site-packages -name "*.pyc" | xargs rm -rf \
-    && find /usr/local/lib/python3.9/site-packages -name "*.pyo" | xargs rm -rf \
-    && pip cache purge
+# Upgrade pip and install dependencies
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -r requirements.txt && \
+    find /usr/local/lib/python3.9/site-packages -name "*.pyc" | xargs rm -rf && \
+    find /usr/local/lib/python3.9/site-packages -name "*.pyo" | xargs rm -rf && \
+    pip cache purge
 
 # Create directories
 RUN mkdir -p /app/models /app/models/cache /app/models/torch

@@ -1,27 +1,24 @@
---find-links https://download.pytorch.org/whl/cpu/torch_stable.html
-torch==2.0.0+cpu
-torchvision==0.15.0+cpu
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==1.13.1+cpu
+torchvision==0.14.1+cpu
 transformers==4.21.0
 fastapi==0.68.0
 uvicorn==0.15.0
 python-dotenv==0.19.0
 playwright==1.28.0
-protobuf==3.17.3
 numpy==1.21.0
 psutil==5.8.0
 pydantic==1.8.2
 python-multipart==0.0.5
 typing-extensions==3.10.0.0
-asyncio==3.4.3
-aiofiles==0.7.0
 requests==2.26.0
 tqdm==4.61.2
 packaging==21.0
 regex==2021.8.28
-sacremoses==0.0.45
 tokenizers==0.10.3
 filelock==3.0.12
 huggingface-hub==0.0.12
+protobuf==3.17.3
 six==1.16.0
 urllib3==1.26.6
 certifi==2021.5.30
