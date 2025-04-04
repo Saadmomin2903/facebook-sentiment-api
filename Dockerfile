@@ -45,9 +45,8 @@ RUN CHROME_DRIVER_VERSION="114.0.5735.90" \
 # Copy requirements first
 COPY requirements.txt .
 
-# Install CPU-only PyTorch and other requirements
-RUN pip install --no-cache-dir torch==2.0.0+cpu torchvision==0.15.0+cpu -f https://download.pytorch.org/whl/cpu/torch_stable.html \
-    && pip install --no-cache-dir -r requirements.txt \
+# Install dependencies
+RUN pip install --no-cache-dir -r requirements.txt \
     && find /usr/local/lib/python3.9/site-packages -name "*.pyc" | xargs rm -rf \
     && find /usr/local/lib/python3.9/site-packages -name "*.pyo" | xargs rm -rf \
     && pip cache purge
