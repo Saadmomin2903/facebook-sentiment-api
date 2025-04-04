@@ -1,9 +1,16 @@
 FROM python:3.9-slim
 
-# Set environment variables for Python
+# Set environment variables for Python and memory optimization
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV MALLOC_TRIM_THRESHOLD_=100000
+ENV PYTORCH_NO_CUDA_MEMORY_CACHING=1
+ENV PYTORCH_JIT=1
+ENV OMP_NUM_THREADS=1
+ENV MKL_NUM_THREADS=1
+
+# Set memory limit for the container
+ENV MEMORY_LIMIT=512m
 
 WORKDIR /app
 
@@ -39,10 +46,11 @@ RUN CHROME_DRIVER_VERSION="114.0.5735.90" \
 COPY requirements.txt .
 RUN pip install --no-cache-dir --compile -r requirements.txt \
     && find /usr/local/lib/python3.9/site-packages -name "*.pyc" | xargs rm -rf \
-    && find /usr/local/lib/python3.9/site-packages -name "*.pyo" | xargs rm -rf
+    && find /usr/local/lib/python3.9/site-packages -name "*.pyo" | xargs rm -rf \
+    && pip cache purge
 
-# Create directory for models
-RUN mkdir -p /app/models
+# Create directory for models and cache
+RUN mkdir -p /app/models /app/models/cache /app/models/torch
 
 # Copy application code and scripts
 COPY . .
@@ -54,13 +62,16 @@ ENV PORT=10000
 ENV MODEL_PATH=/app/models/best_marathi_sentiment_model.pth
 ENV TRANSFORMERS_CACHE=/app/models/cache
 ENV TORCH_HOME=/app/models/torch
+ENV TRANSFORMERS_OFFLINE=1
 
-# Add a script to clean up after model download
+# Create startup script with memory optimization
 RUN echo '#!/bin/bash\n\
+    ulimit -v 512000\n\
     /app/download_model.sh\n\
     rm -rf /root/.cache/pip\n\
     rm -rf /tmp/*\n\
-    exec uvicorn api:app --host 0.0.0.0 --port $PORT\n' > /app/start.sh \
+    python3 -c "import torch; torch.backends.cudnn.enabled=False"\n\
+    exec uvicorn api:app --host 0.0.0.0 --port $PORT --workers 1 --limit-concurrency 1\n' > /app/start.sh \
     && chmod +x /app/start.sh
 
 # Run the startup script

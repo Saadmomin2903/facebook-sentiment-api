@@ -11,7 +11,9 @@ import logging
 import os
 from dotenv import load_dotenv
 import torch
+import torch.quantization
 from transformers import XLMRobertaTokenizer, XLMRobertaForSequenceClassification
+import gc
 
 # Load environment variables
 load_dotenv()
@@ -38,35 +40,62 @@ MODEL_PATH = os.environ.get("MODEL_PATH", "best_marathi_sentiment_model.pth")
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", 8002))
 
-# Initialize sentiment analyzer
+# Memory optimization function
+def optimize_memory():
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+# Model initialization function
+def load_model(model_path):
+    try:
+        device = torch.device('cpu')
+        
+        # Load with reduced precision and memory optimizations
+        checkpoint = torch.load(model_path, map_location=device, weights_only=True)
+        
+        # Initialize model with 8-bit quantization
+        model = XLMRobertaForSequenceClassification.from_pretrained(
+            "xlm-roberta-base",
+            num_labels=3,
+            torchscript=True,
+            low_cpu_mem_usage=True
+        )
+        
+        # Prepare model for quantization
+        model.eval()
+        model = torch.quantization.quantize_dynamic(
+            model, {torch.nn.Linear}, dtype=torch.qint8
+        )
+        
+        # Load state dict
+        state_dict = checkpoint['model_state_dict']
+        if 'roberta.embeddings.position_ids' in state_dict:
+            del state_dict['roberta.embeddings.position_ids']
+        
+        model.load_state_dict(state_dict, strict=False)
+        
+        # Convert to TorchScript and optimize
+        model = torch.jit.optimize_for_inference(torch.jit.script(model))
+        
+        return model
+    except Exception as e:
+        logger.error(f"Error loading model: {e}")
+        raise
+
+# Initialize model and tokenizer
 try:
+    logger.info("Starting model initialization...")
+    
     # Add XLMRobertaTokenizer to safe globals
     torch.serialization.add_safe_globals([XLMRobertaTokenizer])
     
-    # Load your trained model and tokenizer with memory optimizations
-    device = torch.device('cpu')
-    checkpoint = torch.load(MODEL_PATH, map_location=device, weights_only=True)
+    # Clear memory before loading
+    optimize_memory()
     
-    # Load the model with memory optimizations
-    model = XLMRobertaForSequenceClassification.from_pretrained(
-        "xlm-roberta-base",
-        num_labels=3,
-        torchscript=True,
-        low_cpu_mem_usage=True
-    )
-    model.eval()  # Set to evaluation mode
+    # Load model
+    model = load_model(MODEL_PATH)
     
-    # Load state dict and handle missing keys
-    state_dict = checkpoint['model_state_dict']
-    # Remove position_ids from state_dict if it exists
-    if 'roberta.embeddings.position_ids' in state_dict:
-        del state_dict['roberta.embeddings.position_ids']
-    model.load_state_dict(state_dict, strict=False)
-    
-    # Optimize model for inference
-    model = torch.jit.optimize_for_inference(torch.jit.script(model))
-    
-    # Load fresh tokenizer with memory optimization
+    # Load tokenizer with optimizations
     tokenizer = XLMRobertaTokenizer.from_pretrained(
         "xlm-roberta-base",
         local_files_only=True,
@@ -76,10 +105,8 @@ try:
     # Convert label mapping to sentiment labels
     sentiment_labels = {0: 'Negative', 1: 'Neutral', 2: 'Positive'}
     
-    # Clear some memory
-    import gc
-    gc.collect()
-    torch.cuda.empty_cache()
+    # Final memory cleanup
+    optimize_memory()
     
     logger.info("Sentiment analyzer initialized successfully")
 except Exception as e:
@@ -546,23 +573,30 @@ async def root():
 async def analyze_sentiment_text(text: str) -> dict:
     """Analyze the sentiment of a given text."""
     try:
-        # Tokenize input
-        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+        # Tokenize with max length to save memory
+        inputs = tokenizer(
+            text,
+            return_tensors="pt",
+            truncation=True,
+            max_length=256,  # Reduced from 512
+            padding=True
+        )
         
-        # Get prediction
+        # Get prediction with no gradient computation
         with torch.no_grad():
             outputs = model(**inputs)
             predictions = torch.nn.functional.softmax(outputs.logits, dim=-1)
             
-            # Get sentiment label using the label mapping
             predicted_idx = predictions.argmax().item()
             predicted_label = sentiment_labels[predicted_idx]
-            confidence = float(predictions.max().item())  # Convert to float for JSON serialization
+            confidence = float(predictions.max().item())
             
-            logger.info(f"Analyzed text: '{text[:50]}...' -> {predicted_label} ({confidence:.2f})")
+            # Clear memory after prediction
+            del outputs, predictions
+            optimize_memory()
             
             return {
-                "sentiment": predicted_label,  # Already capitalized from sentiment_labels
+                "sentiment": predicted_label,
                 "confidence": confidence
             }
     except Exception as e:
