@@ -30,7 +30,23 @@ git remote add origin https://github.com/yourusername/facebook-sentiment-api.git
 git push -u origin main
 ```
 
-## Step 2: Deploy on Render
+## Step 2: Upload Model to GitHub Releases
+
+1. Create a new release on GitHub:
+
+   - Go to your repository on GitHub
+   - Click on "Releases" in the right sidebar
+   - Click "Create a new release"
+   - Tag version: v1.0.0
+   - Release title: Initial Release
+   - Upload your model file: `best_marathi_sentiment_model.pth`
+   - Click "Publish release"
+
+2. Update the MODEL_URL in render.yaml:
+   - Replace `yourusername` with your GitHub username
+   - The URL format should be: `https://github.com/yourusername/facebook-sentiment-api/releases/download/v1.0.0/best_marathi_sentiment_model.pth`
+
+## Step 3: Deploy on Render
 
 ### Option A: Deploy via Blueprint (render.yaml)
 
@@ -41,6 +57,7 @@ git push -u origin main
 5. During setup, you'll be asked to provide your Facebook credentials as environment variables:
    - Set `FB_EMAIL` to your Facebook email
    - Set `FB_PASSWORD` to your Facebook password
+   - The `MODEL_URL` will be automatically set from render.yaml
 
 ### Option B: Manual Deployment
 
@@ -61,88 +78,49 @@ If the blueprint approach doesn't work, you can set up manually:
    - `FB_EMAIL`: Your Facebook email
    - `FB_PASSWORD`: Your Facebook password
    - `MODEL_PATH`: `/app/models/best_marathi_sentiment_model.pth`
+   - `MODEL_URL`: Your GitHub release URL
    - `PORT`: `10000`
 
 6. Click "Create Web Service"
 
-## Step 3: Handle Your Model File
-
-Since the free tier doesn't support persistent disks, we need to handle the model file differently. Here are your options:
-
-### Option A: Host Your Model File (Easiest Methods)
-
-Choose one of these simple methods to host your model file:
-
-#### Method 1: GitHub Releases (Recommended)
-
-1. Install GitHub CLI if you haven't already:
-
-   ```bash
-   # macOS
-   brew install gh
-
-   # Windows
-   winget install GitHub.cli
-
-   # Linux
-   sudo apt install gh
-   ```
-
-2. Log in to GitHub:
-
-   ```bash
-   gh auth login
-   ```
-
-3. Run the upload script:
-
-   ```bash
-   chmod +x upload_to_github_release.sh
-   ./upload_to_github_release.sh
-   ```
-
-4. Set the `MODEL_URL` in your Render dashboard to the URL provided by the script.
-
-#### Method 2: Google Drive
-
-1. Upload your model file to Google Drive
-2. Right-click the file and select "Share"
-3. Change sharing to "Anyone with the link"
-4. Get the shareable link
-5. Modify the link to force download by changing it to:
-   ```
-   https://drive.google.com/uc?export=download&id=YOUR_FILE_ID
-   ```
-   (Replace YOUR_FILE_ID with the ID from your shareable link)
-6. Set this modified URL as your `MODEL_URL`
-
-#### Method 3: Dropbox
-
-1. Upload your model file to Dropbox
-2. Create a shareable link
-3. Modify the link by changing `dl=0` to `dl=1` at the end
-4. Set this modified URL as your `MODEL_URL`
-
-### Option B: Use a Smaller Model
-
-1. Consider using a quantized or smaller version of your model
-2. This will help with the memory constraints of the free tier
-
-### Option C: Upgrade to a Paid Plan
-
-If you need the full model:
-
-1. Upgrade to a paid plan that supports persistent disks
-2. Follow the original deployment guide with persistent storage
-
 ## Step 4: Verify Deployment
 
-1. Once deployment is complete, your service will be available at the URL provided by Render (usually `https://fb-sentiment-api.onrender.com`)
-2. Test the API by visiting the `/test-sentiment` endpoint:
+1. Once deployed, test the API using the health check endpoint:
+
    ```
-   https://fb-sentiment-api.onrender.com/test-sentiment
+   curl https://your-render-app.onrender.com/test-sentiment
    ```
-3. If the test works, your API is ready to use!
+
+2. Test the sentiment analysis endpoint:
+   ```
+   curl -X GET "https://your-render-app.onrender.com/analyze-fb-post?url=https://www.facebook.com/SaamTV/videos/1729089121344119"
+   ```
+
+## Troubleshooting
+
+1. If the model fails to download:
+
+   - Verify the MODEL_URL in render.yaml is correct
+   - Check that the release is public and accessible
+   - Ensure the model file name matches exactly
+
+2. If the API fails to start:
+
+   - Check the logs in Render dashboard
+   - Verify all environment variables are set correctly
+   - Ensure the model file is downloaded successfully
+
+3. If you need to update the model:
+   - Create a new release on GitHub
+   - Update the MODEL_URL in render.yaml
+   - Redeploy the service on Render
+
+## Notes
+
+- The free tier has limitations on memory and CPU usage
+- The model will be downloaded each time the container starts
+- Keep your Facebook credentials secure and never commit them to the repository
+- Monitor your API usage to stay within free tier limits
 
 ## Using Your API
 
@@ -165,29 +143,3 @@ Be aware of these limitations:
 4. **Usage Limits**: The free tier includes 750 hours of usage per month.
 
 5. **No Persistent Storage**: The free tier doesn't support persistent disks, so we need to handle the model file differently.
-
-## Troubleshooting
-
-### Model Loading Issues
-
-If your model fails to load due to memory constraints, you have a few options:
-
-1. **Quantize your model**: Convert your model to a smaller format (like int8 quantization)
-2. **Upgrade to a paid plan**: Consider upgrading to a paid plan with more resources
-3. **Split your service**: Run the scraper and sentiment analysis as separate services
-
-### Facebook Scraping Issues
-
-If Facebook starts blocking your scraper:
-
-1. Add more randomized delays between actions
-2. Use proxies (though this may require a paid Render plan)
-3. Implement retry mechanisms
-
-### Service Timeouts
-
-If requests time out:
-
-1. Increase the timeout value in your code
-2. Consider splitting long-running operations into smaller tasks
-3. Implement background processing with a queue (though this would require a paid plan)

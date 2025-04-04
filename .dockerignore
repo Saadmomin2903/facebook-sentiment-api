@@ -1,0 +1,24 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+env/
+ENV/
+
+# Model files (will be handled separately due to size)
+*.pth
+
+# System files
+.DS_Store
+
+# Backup files
+backup/
+
+# Development resources
+.git/
+.gitignore
+.github/
+README.md 

@@ -1,8 +1,10 @@
 import torch
 import torch.nn as nn
-from transformers import AutoTokenizer, AutoModel
-import numpy as np
-from typing import Dict, List, Tuple
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from typing import Tuple, List
+import logging
+
+logger = logging.getLogger(__name__)
 
 class SimpleSentimentAnalyzer:
     def __init__(self, model_path: str):
@@ -14,53 +16,74 @@ class SimpleSentimentAnalyzer:
             model_path (str): Path to the model file
         """
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"Using device: {self.device}")
+        logger.info(f"Using device: {self.device}")
         
-        # Load model
+        # Load model and tokenizer
+        self.model, self.tokenizer = self._load_model(model_path)
+        self.model.eval()
+
+    def _load_model(self, model_path: str) -> Tuple[nn.Module, AutoTokenizer]:
+        """Load the model with proper error handling."""
         try:
-            self.model = self._load_model(model_path)
-            print("Model loaded successfully")
+            # First try loading with weights_only=True (PyTorch 2.6 default)
+            try:
+                checkpoint = torch.load(model_path, map_location=self.device, weights_only=True)
+                logger.info("Model loaded successfully with weights_only=True")
+            except Exception as e:
+                logger.warning(f"Loading with weights_only=True failed: {e}")
+                logger.info("Attempting to load with weights_only=False")
+                
+                # If that fails, try loading with weights_only=False
+                checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+                logger.info("Model loaded successfully with weights_only=False")
+
+            # Extract components from checkpoint
+            model_state_dict = checkpoint.get('model_state_dict', checkpoint)
+            config = checkpoint.get('config', {})
             
-            # Load tokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained("ai4bharat/indic-bert")
-            print("Tokenizer loaded")
+            # Initialize model with the same architecture as saved
+            model = AutoModelForSequenceClassification.from_pretrained(
+                "ai4bharat/indic-bert",
+                num_labels=3,
+                state_dict=model_state_dict
+            )
+            model.to(self.device)
             
-            self.model.eval()
+            # Initialize tokenizer
+            tokenizer = self.tokenizer if hasattr(self, 'tokenizer') else AutoTokenizer.from_pretrained("ai4bharat/indic-bert")
+            
+            return model, tokenizer
+            
         except Exception as e:
-            print(f"Error loading model: {e}")
-            raise
-    
-    def _load_model(self, model_path: str) -> nn.Module:
-        """Load the PyTorch model from the given path."""
-        try:
-            # Try loading with map_location to handle CPU/GPU compatibility
-            model = torch.load(model_path, map_location=self.device)
-            return model
-        except Exception as e:
-            print(f"Error loading model: {e}")
+            logger.error(f"Error loading model: {e}")
             raise
     
     def predict(self, text: str) -> Tuple[str, float]:
         """Predict sentiment for a single text."""
         try:
-            inputs = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
+            # Tokenize input
+            inputs = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True)
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
             
+            # Get model predictions
             with torch.no_grad():
                 outputs = self.model(**inputs)
                 logits = outputs.logits
                 probabilities = torch.softmax(logits, dim=1)
-                predicted_class = torch.argmax(probabilities, dim=1).item()
-                confidence = probabilities[0][predicted_class].item()
-            
-            sentiment_map = {0: "negative", 1: "neutral", 2: "positive"}
-            return sentiment_map[predicted_class], confidence
+                confidence, predicted = torch.max(probabilities, dim=1)
+                
+                # Convert to sentiment labels
+                sentiment_map = {0: "negative", 1: "neutral", 2: "positive"}
+                sentiment = sentiment_map[predicted.item()]
+                confidence = confidence.item()
+                
+                return sentiment, confidence
         except Exception as e:
-            print(f"Error in prediction: {e}")
-            return "error", 0.0
+            logger.error(f"Error in prediction: {e}")
+            raise
 
     def predict_batch(self, texts: List[str]) -> List[Tuple[str, float]]:
-        """Predict sentiment for a batch of texts."""
+        """Predict sentiment for multiple texts."""
         return [self.predict(text) for text in texts]
 
 

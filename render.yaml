@@ -9,7 +9,7 @@ services:
       - key: MODEL_PATH
         value: /app/models/best_marathi_sentiment_model.pth
       - key: MODEL_URL
-        sync: false
+        value: https://github.com/Saadmomin2903/facebook-sentiment-api/releases/tag/v1.0.0/best_marathi_sentiment_model.pth
       - key: FB_EMAIL
         sync: false
       - key: FB_PASSWORD

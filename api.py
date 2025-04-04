@@ -6,10 +6,11 @@ from playwright.async_api import async_playwright
 import json
 from datetime import datetime
 import uvicorn
-from custom_sentiment import CustomMarathiSentimentAnalyzer
 import logging
 import os
 from dotenv import load_dotenv
+import torch
+from transformers import XLMRobertaTokenizer, XLMRobertaForSequenceClassification
 
 # Load environment variables
 load_dotenv()
@@ -38,7 +39,29 @@ PORT = int(os.environ.get("PORT", 8002))
 
 # Initialize sentiment analyzer
 try:
-    analyzer = CustomMarathiSentimentAnalyzer(MODEL_PATH)
+    # Add XLMRobertaTokenizer to safe globals
+    torch.serialization.add_safe_globals([XLMRobertaTokenizer])
+    
+    # Load your trained model and tokenizer
+    checkpoint = torch.load(MODEL_PATH, map_location=torch.device('cpu'), weights_only=False)
+    
+    # Load the model
+    model = XLMRobertaForSequenceClassification.from_pretrained("xlm-roberta-base", num_labels=3)
+    model.eval()  # Set to evaluation mode
+    
+    # Load state dict and handle missing keys
+    state_dict = checkpoint['model_state_dict']
+    # Remove position_ids from state_dict if it exists
+    if 'roberta.embeddings.position_ids' in state_dict:
+        del state_dict['roberta.embeddings.position_ids']
+    model.load_state_dict(state_dict, strict=False)
+    
+    # Load fresh tokenizer
+    tokenizer = XLMRobertaTokenizer.from_pretrained("xlm-roberta-base")
+    
+    # Convert label mapping to sentiment labels
+    sentiment_labels = {0: 'Negative', 1: 'Neutral', 2: 'Positive'}  # Capitalized labels
+    
     logger.info("Sentiment analyzer initialized successfully")
 except Exception as e:
     logger.error(f"Failed to initialize sentiment analyzer: {e}")
@@ -340,7 +363,7 @@ async def analyze_post_sentiment(request: PostUrlRequest):
                 logger.info(f"Analyzing comment {i+1}/{len(post_data['comments'])}: {comment['comment'][:50]}...")
                 try:
                     # Perform sentiment analysis
-                    sentiment_result = analyzer.predict(comment['comment'])
+                    sentiment_result = await analyze_sentiment_text(comment['comment'])
                     
                     # Create a CommentSentiment object
                     comment_sentiment = {
@@ -388,119 +411,82 @@ async def analyze_post_sentiment(request: PostUrlRequest):
 
 @app.get("/analyze-fb-post")
 async def analyze_fb_post(url: str):
-    """
-    Single GET endpoint to analyze a Facebook post with a URL parameter.
-    Uses predefined Facebook credentials and analyzes comment sentiment.
-    
-    Example: `/analyze-fb-post?url=https://www.facebook.com/sample/post`
-    """
-    scraper = FacebookScraper()
+    scraper = None
     try:
-        logger.info(f"Starting one-click analysis for URL: {url}")
-        
-        # Initialize and login with predefined credentials
+        # Initialize scraper
+        scraper = FacebookScraper()
         await scraper.initialize()
         await scraper.login(FB_EMAIL, FB_PASSWORD)
         
         # Scrape the post
+        logger.info("Scraping post data...")
         post_data = await scraper.scrape_post(url)
+        logger.info(f"Found {len(post_data['comments'])} comments")
         
-        # Summarize post information
-        post_summary = {
-            "title": post_data['post']['content'][:100] + "..." if len(post_data['post']['content']) > 100 else post_data['post']['content'],
-            "author": post_data['post']['author'],
-            "time": post_data['post']['time'],
-            "total_comments": len(post_data['comments'])
-        }
-        
-        # Analyze the sentiment of each comment
-        comment_analysis = []
-        sentiment_counts = {"Positive": 0, "Negative": 0, "Neutral": 0, "Error": 0}
-        
-        # First verify the model is working as expected with a test case
-        test_text = "तुमचे काम खूप छान आहे!"  # "Your work is very nice!"
-        test_result = analyzer.predict(test_text)
-        logger.info(f"Verification test: '{test_text}' → Got: {test_result['sentiment']} (Expected: Positive)")
-        
-        # No need to print label mapping
-        
+        # Analyze only the comments
+        analyzed_comments = []
         for comment in post_data['comments']:
-            if 'comment' in comment and comment['comment']:
-                try:
-                    # Log the exact comment for debugging
-                    comment_text = comment['comment']
-                    logger.info(f"Processing comment: '{comment_text}'")
-                    
-                    # Clean the comment text if needed
-                    cleaned_text = comment_text.strip()
-                    
-                    # Analyze the comment's sentiment
-                    sentiment_result = analyzer.predict(cleaned_text)
-                    sentiment_label = sentiment_result['sentiment']
-                    confidence = sentiment_result['confidence']
-                    
-                    logger.info(f"⭐ Result: {sentiment_label} (Confidence: {confidence:.2f})")
-                    
-                    # Create a comment sentiment entry
-                    comment_item = {
-                        'author': comment.get('author', 'Unknown'),
-                        'comment': comment_text,
-                        'time': comment.get('time', ''),
-                        'sentiment': sentiment_label,
-                        'confidence': round(confidence, 2)
-                    }
-                    comment_analysis.append(comment_item)
-                    
-                    # Update sentiment counts
-                    sentiment_counts[sentiment_label] += 1
-                    
-                except Exception as e:
-                    logger.error(f"Error analyzing comment: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
-                    
-                    # Still include the comment but with error sentiment
-                    comment_item = {
-                        'author': comment.get('author', 'Unknown'),
-                        'comment': comment['comment'],
-                        'time': comment.get('time', ''),
-                        'sentiment': 'Error',
-                        'confidence': 0.0
-                    }
-                    comment_analysis.append(comment_item)
-                    sentiment_counts["Error"] += 1
+            try:
+                # Only analyze the comment text if it exists
+                if 'comment' in comment and comment['comment']:
+                    logger.info(f"Analyzing comment: {comment['comment'][:50]}...")
+                    sentiment_result = await analyze_sentiment_text(comment['comment'])
+                    analyzed_comments.append({
+                        "author": comment['author'],
+                        "comment": comment['comment'],
+                        "time": comment['time'],
+                        "sentiment": sentiment_result["sentiment"],
+                        "confidence": sentiment_result["confidence"]
+                    })
+            except Exception as e:
+                logger.error(f"Error analyzing comment: {str(e)}")
+                analyzed_comments.append({
+                    "author": comment['author'],
+                    "comment": comment['comment'],
+                    "time": comment['time'],
+                    "sentiment": "Error",
+                    "confidence": 0.0
+                })
         
-        # Calculate sentiment distribution percentage
-        total_comments = len(comment_analysis)
-        sentiment_distribution = {
-            "positive_percent": round(sentiment_counts["Positive"] / total_comments * 100, 1) if total_comments > 0 else 0,
-            "negative_percent": round(sentiment_counts["Negative"] / total_comments * 100, 1) if total_comments > 0 else 0,
-            "neutral_percent": round(sentiment_counts["Neutral"] / total_comments * 100, 1) if total_comments > 0 else 0,
+        # Calculate sentiment distribution
+        sentiment_counts = {"Positive": 0, "Negative": 0, "Neutral": 0, "Error": 0}
+        for comment in analyzed_comments:
+            sentiment_counts[comment["sentiment"]] += 1
+        
+        total_comments = len(analyzed_comments)
+        distribution = {
+            "positive_percent": (sentiment_counts["Positive"] / total_comments * 100) if total_comments > 0 else 0.0,
+            "negative_percent": (sentiment_counts["Negative"] / total_comments * 100) if total_comments > 0 else 0.0,
+            "neutral_percent": (sentiment_counts["Neutral"] / total_comments * 100) if total_comments > 0 else 0.0
         }
         
-        # Prepare the comprehensive response
         response = {
-            'post': post_summary,
-            'sentiment_summary': {
-                'counts': sentiment_counts,
-                'distribution': sentiment_distribution
+            "post": {
+                "title": post_data['post']['content'],
+                "author": post_data['post']['author'],
+                "time": post_data['post']['time'],
+                "total_comments": len(post_data['comments'])
             },
-            'comment_analysis': comment_analysis,
-            'metadata': {
-                'scraped_at': post_data['metadata']['scraped_at'],
-                'analyzed_comments': total_comments
+            "sentiment_summary": {
+                "counts": sentiment_counts,
+                "distribution": distribution
+            },
+            "comment_analysis": analyzed_comments,
+            "metadata": {
+                "scraped_at": datetime.now().isoformat(),
+                "analyzed_comments": len(analyzed_comments)
             }
         }
         
+        logger.info("Analysis complete")
         return response
         
     except Exception as e:
-        logger.error(f"Error in one-click analysis: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error analyzing Facebook post: {str(e)}")
+        logger.error(f"Error in analyze_fb_post: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to analyze post: {str(e)}")
     finally:
-        await scraper.close()
+        if scraper:
+            await scraper.close()
 
 # Add a test endpoint to verify sentiment model is working correctly
 @app.get("/test-sentiment")
@@ -510,7 +496,7 @@ async def test_sentiment():
     
     # Test each sample
     for text, expected in TEST_SENTENCES.items():
-        result = analyzer.predict(text)
+        result = await analyze_sentiment_text(text)
         results.append({
             "text": text,
             "expected": expected,
@@ -538,27 +524,52 @@ async def root():
         "version": "1.0.0"
     }
 
+async def analyze_sentiment_text(text: str) -> dict:
+    """Analyze the sentiment of a given text."""
+    try:
+        # Tokenize input
+        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+        
+        # Get prediction
+        with torch.no_grad():
+            outputs = model(**inputs)
+            predictions = torch.nn.functional.softmax(outputs.logits, dim=-1)
+            
+            # Get sentiment label using the label mapping
+            predicted_idx = predictions.argmax().item()
+            predicted_label = sentiment_labels[predicted_idx]
+            confidence = float(predictions.max().item())  # Convert to float for JSON serialization
+            
+            logger.info(f"Analyzed text: '{text[:50]}...' -> {predicted_label} ({confidence:.2f})")
+            
+            return {
+                "sentiment": predicted_label,  # Already capitalized from sentiment_labels
+                "confidence": confidence
+            }
+    except Exception as e:
+        logger.error(f"Error in sentiment analysis for text '{text[:50]}...': {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to analyze sentiment: {str(e)}"
+        )
+
 @app.post("/analyze", response_model=SentimentResponse)
 async def analyze_sentiment(request: SentimentRequest):
     try:
-        sentiment, confidence = analyzer.predict(request.text)
-        return SentimentResponse(sentiment=sentiment, confidence=confidence)
+        result = await analyze_sentiment_text(request.text)
+        return SentimentResponse(**result)
     except Exception as e:
-        logger.error(f"Error analyzing sentiment: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/analyze-batch", response_model=BatchSentimentResponse)
 async def analyze_batch_sentiment(request: BatchSentimentRequest):
     try:
-        results = analyzer.predict_batch(request.texts)
-        return BatchSentimentResponse(
-            results=[
-                SentimentResponse(sentiment=sentiment, confidence=confidence)
-                for sentiment, confidence in results
-            ]
-        )
+        results = []
+        for text in request.texts:
+            result = await analyze_sentiment_text(text)
+            results.append(SentimentResponse(**result))
+        return BatchSentimentResponse(results=results)
     except Exception as e:
-        logger.error(f"Error analyzing batch sentiment: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
