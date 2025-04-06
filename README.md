@@ -1,107 +1,94 @@
-# Facebook Post Sentiment Analysis API
+# Marathi Sentiment Analysis API
 
-A powerful API that scrapes Facebook posts and performs sentiment analysis on Marathi text, providing insights into the emotional tone of the content.
+This is a FastAPI and Gradio-based application for analyzing sentiment in Marathi text and Facebook posts. The application provides both API endpoints and a web interface.
 
 ## Features
 
-- **Facebook Post Scraping**: Automatically scrapes posts from Facebook URLs
-- **Marathi Sentiment Analysis**: Analyzes sentiment in Marathi text using a custom deep learning model
-- **REST API**: Easy to use REST API with FastAPI
-- **Dockerized**: Ready to deploy with Docker
+- Marathi text sentiment analysis
+- Facebook post sentiment analysis
+- Batch sentiment analysis
+- Web interface using Gradio
+- RESTful API endpoints
 
-## Getting Started
+## API Endpoints
 
-### Prerequisites
+- `/analyze` - Analyze sentiment of a single Marathi text
+- `/analyze-batch` - Analyze sentiment of multiple texts
+- `/scrape-post` - Scrape a Facebook post
+- `/analyze-post-sentiment` - Analyze sentiment of Facebook post comments
 
-- Python 3.9+
-- Docker (optional, for containerized deployment)
+## Environment Variables
 
-### Installation
-
-1. Clone this repository:
-
-   ```
-   git clone https://github.com/yourusername/facebook-sentiment-api.git
-   cd facebook-sentiment-api
-   ```
-
-2. Install dependencies:
-
-   ```
-   pip install -r requirements.txt
-   ```
-
-3. Download the sentiment model:
-   [Download best_marathi_sentiment_model.pth](link-to-your-model)
-
-   Place it in a location and set the `MODEL_PATH` environment variable to point to it.
-
-### Environment Variables
-
-Create a `.env` file in the root directory with the following variables:
-
-```
+```bash
 FB_EMAIL=your_facebook_email
 FB_PASSWORD=your_facebook_password
-MODEL_PATH=./best_marathi_sentiment_model.pth
-PORT=8000
+MODEL_PATH=path_to_your_model.pth
 ```
 
-### Running Locally
+## Model
 
-Start the API server:
+The model file (`best_marathi_sentiment_model.pth`) should be placed in the root directory or specified using the `MODEL_PATH` environment variable.
 
-```
-uvicorn api:app --host 0.0.0.0 --port 8000
-```
+## Deployment on Hugging Face Spaces
 
-### Docker Deployment
+1. Create a new Space on Hugging Face:
 
-Build and run with Docker:
+   - Go to huggingface.co/spaces
+   - Click "Create new Space"
+   - Choose "Gradio" as the SDK
+   - Name your space and set it to "Public"
 
-```
-docker build -t fb-sentiment-api .
-docker run -p 8000:8000 -v $(pwd):/app --env-file .env fb-sentiment-api
-```
+2. Upload your model:
 
-## API Usage
+   - Go to your Space's "Files" tab
+   - Upload your `best_marathi_sentiment_model.pth` file
 
-### Analyze a Facebook Post
+3. Set environment variables:
 
-```
-GET /analyze-fb-post?url=https://www.facebook.com/permalink.php?story_fbid=123456789
-```
+   - Go to your Space's "Settings" tab
+   - Add your Facebook credentials as secrets
 
-#### Response
+4. The application will automatically deploy when you push your code.
 
-```json
-{
-  "post_text": "आज खूप छान दिवस होता!",
-  "sentiment": "positive",
-  "confidence": 0.92,
-  "sentiment_scores": {
-    "positive": 0.92,
-    "negative": 0.05,
-    "neutral": 0.03
-  }
-}
+## Local Development
+
+1. Install dependencies:
+
+```bash
+pip install -r requirements.txt
 ```
 
-### Test Sentiment Analysis
+2. Run the application:
 
+```bash
+python app.py
 ```
-GET /test-sentiment
+
+The application will be available at `http://localhost:7860`
+
+## API Usage Examples
+
+### Analyze Single Text
+
+```python
+import requests
+
+response = requests.post(
+    "http://localhost:7860/analyze",
+    json={"text": "तुमचे काम खूप छान आहे!"}
+)
+print(response.json())
 ```
 
-This endpoint provides a quick test of the sentiment analysis functionality using predefined examples.
+### Analyze Facebook Post
 
-## Deployment
-
-For deploying to Render's free tier, see the [FREE_DEPLOYMENT_GUIDE.md](FREE_DEPLOYMENT_GUIDE.md) file.
-
-## Model Training
-
-The sentiment analysis model was trained on a dataset of Marathi texts. For details on the model architecture and training process, please check the documentation.
+```python
+response = requests.post(
+    "http://localhost:7860/analyze-post-sentiment",
+    json={"post_url": "https://www.facebook.com/..."}
+)
+print(response.json())
+```
 
 ## License
 

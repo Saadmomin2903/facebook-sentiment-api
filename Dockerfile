@@ -4,17 +4,17 @@ FROM python:3.9-slim
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV MALLOC_TRIM_THRESHOLD_=100000
+ENV PYTORCH_NO_CUDA_MEMORY_CACHING=1
+ENV PYTORCH_JIT=1
 ENV OMP_NUM_THREADS=1
 ENV MKL_NUM_THREADS=1
-ENV PYTORCH_JIT=1
-ENV FORCE_CUDA=0
 
 # Set memory limit for the container
 ENV MEMORY_LIMIT=512m
 
 WORKDIR /app
 
-# Install system dependencies
+# Install Chrome and required dependencies with cleanup in same layer
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -23,11 +23,10 @@ RUN apt-get update && apt-get install -y \
     libxi6 \
     libgconf-2-4 \
     default-jdk \
-    build-essential \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# Install Chrome
+# Install Chrome with cleanup in same layer
 RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
     && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list \
     && apt-get update \
@@ -35,7 +34,7 @@ RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# Install ChromeDriver
+# Install ChromeDriver with cleanup
 RUN CHROME_DRIVER_VERSION="114.0.5735.90" \
     && wget -q "https://chromedriver.storage.googleapis.com/$CHROME_DRIVER_VERSION/chromedriver_linux64.zip" \
     && unzip chromedriver_linux64.zip \
@@ -43,17 +42,14 @@ RUN CHROME_DRIVER_VERSION="114.0.5735.90" \
     && chmod +x /usr/bin/chromedriver \
     && rm chromedriver_linux64.zip
 
-# Copy requirements first
+# Copy requirements and install with pip optimization
 COPY requirements.txt .
+RUN pip install --no-cache-dir --compile -r requirements.txt \
+    && find /usr/local/lib/python3.9/site-packages -name "*.pyc" | xargs rm -rf \
+    && find /usr/local/lib/python3.9/site-packages -name "*.pyo" | xargs rm -rf \
+    && pip cache purge
 
-# Upgrade pip and install dependencies
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir -r requirements.txt && \
-    find /usr/local/lib/python3.9/site-packages -name "*.pyc" | xargs rm -rf && \
-    find /usr/local/lib/python3.9/site-packages -name "*.pyo" | xargs rm -rf && \
-    pip cache purge
-
-# Create directories
+# Create directory for models and cache
 RUN mkdir -p /app/models /app/models/cache /app/models/torch
 
 # Copy application code and scripts
@@ -61,26 +57,21 @@ COPY . .
 COPY download_model.sh /app/
 RUN chmod +x /app/download_model.sh
 
-# Environment variables
+# Default env variables
 ENV PORT=10000
 ENV MODEL_PATH=/app/models/best_marathi_sentiment_model.pth
 ENV TRANSFORMERS_CACHE=/app/models/cache
 ENV TORCH_HOME=/app/models/torch
 ENV TRANSFORMERS_OFFLINE=1
 
-# Create startup script with memory management
+# Create startup script with memory optimization
 RUN echo '#!/bin/bash\n\
-    # Set memory limit\n\
     ulimit -v 512000\n\
-    # Set PyTorch environment\n\
-    export LD_LIBRARY_PATH=/usr/local/lib/python3.9/site-packages/torch/lib:$LD_LIBRARY_PATH\n\
-    # Download model\n\
     /app/download_model.sh\n\
-    # Cleanup\n\
     rm -rf /root/.cache/pip\n\
     rm -rf /tmp/*\n\
-    # Start server with minimal footprint\n\
-    exec uvicorn api:app --host 0.0.0.0 --port $PORT --workers 1 --limit-concurrency 1 --no-access-log\n' > /app/start.sh \
+    python3 -c "import torch; torch.backends.cudnn.enabled=False"\n\
+    exec uvicorn api:app --host 0.0.0.0 --port $PORT --workers 1 --limit-concurrency 1\n' > /app/start.sh \
     && chmod +x /app/start.sh
 
 # Run the startup script

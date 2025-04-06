@@ -9,27 +9,11 @@ from datetime import datetime
 import uvicorn
 import logging
 import os
-import io
-import mmap
-import resource
 from dotenv import load_dotenv
 import torch
 import torch.quantization
 from transformers import XLMRobertaTokenizer, XLMRobertaForSequenceClassification
 import gc
-import sys
-import numpy as np
-from pathlib import Path
-import psutil
-
-# Force absolute minimal resource usage
-torch.set_num_threads(1)
-os.environ['OMP_NUM_THREADS'] = '1'
-os.environ['MKL_NUM_THREADS'] = '1'
-os.environ['OPENBLAS_NUM_THREADS'] = '1'
-os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
-os.environ['NUMEXPR_NUM_THREADS'] = '1'
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:32'
 
 # Load environment variables
 load_dotenv()
@@ -39,248 +23,11 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def limit_memory():
-    """Limit memory usage for the current process"""
-    process = psutil.Process(os.getpid())
-    
-    # Set soft limit to 450MB
-    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-    resource.setrlimit(resource.RLIMIT_AS, (450 * 1024 * 1024, hard))
-    
-    # Set CPU affinity to use only one core
-    try:
-        process.cpu_affinity([0])
-    except AttributeError:
-        pass  # Not supported on all platforms
-
-class ModelManager:
-    def __init__(self):
-        self.model = None
-        self.tokenizer = None
-        self.is_initialized = False
-        self.sentiment_labels = {0: 'Negative', 1: 'Neutral', 2: 'Positive'}
-        self.chunk_size = 32 * 1024 * 1024  # 32MB chunks
-        
-    @staticmethod
-    def optimize_memory():
-        gc.collect()
-        if hasattr(torch, 'cuda'):
-            torch.cuda.empty_cache()
-        
-    def load_model_in_chunks(self, model_path):
-        try:
-            # Clear any existing model
-            if self.model is not None:
-                del self.model
-                self.optimize_memory()
-
-            logger.info("Loading model in chunks...")
-            
-            # Initialize base model with minimal memory
-            model = XLMRobertaForSequenceClassification.from_pretrained(
-                "xlm-roberta-base",
-                num_labels=3,
-                torchscript=True,
-                low_cpu_mem_usage=True,
-                return_dict=False
-            )
-            
-            # Use memory mapping to load the file
-            with open(model_path, 'rb') as f:
-                with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-                    # Read file size
-                    file_size = len(mm)
-                    
-                    # Read in chunks using memory mapping
-                    buffer = bytearray()
-                    offset = 0
-                    
-                    while offset < file_size:
-                        chunk_size = min(self.chunk_size, file_size - offset)
-                        buffer.extend(mm[offset:offset + chunk_size])
-                        offset += chunk_size
-                        
-                        logger.info(f"Read {offset}/{file_size} bytes")
-                        self.optimize_memory()
-                    
-                    # Load checkpoint from buffer
-                    checkpoint = torch.load(
-                        io.BytesIO(buffer),
-                        map_location='cpu',
-                        weights_only=True
-                    )
-                    
-                    # Clean up buffer
-                    del buffer
-                    self.optimize_memory()
-            
-            # Process state dict in chunks
-            state_dict = checkpoint['model_state_dict']
-            del checkpoint
-            self.optimize_memory()
-            
-            if 'roberta.embeddings.position_ids' in state_dict:
-                del state_dict['roberta.embeddings.position_ids']
-            
-            # Load state dict in chunks with numpy intermediates
-            for key in list(state_dict.keys()):
-                if isinstance(state_dict[key], torch.Tensor):
-                    # Process tensor in chunks if it's large
-                    tensor = state_dict[key]
-                    if tensor.numel() * tensor.element_size() > self.chunk_size:
-                        # Convert to numpy array in chunks
-                        shape = tensor.shape
-                        dtype = tensor.dtype
-                        np_array = np.empty(shape, dtype=np.float32)
-                        
-                        # Process in chunks
-                        chunk_size = self.chunk_size // (tensor.element_size() * np.prod(shape[1:]))
-                        for i in range(0, shape[0], chunk_size):
-                            end = min(i + chunk_size, shape[0])
-                            np_array[i:end] = tensor[i:end].cpu().numpy()
-                            self.optimize_memory()
-                        
-                        # Convert back to torch tensor
-                        state_dict[key] = torch.from_numpy(np_array)
-                        del np_array
-                    else:
-                        # Small tensor, process directly
-                        state_dict[key] = torch.from_numpy(np.array(tensor.cpu()))
-                    
-                    self.optimize_memory()
-            
-            # Load state dict
-            model.load_state_dict(state_dict, strict=False)
-            del state_dict
-            self.optimize_memory()
-            
-            # Quantize and optimize
-            model.eval()
-            model = torch.quantization.quantize_dynamic(
-                model, 
-                {torch.nn.Linear, torch.nn.LayerNorm}, 
-                dtype=torch.qint8
-            )
-            
-            # Convert to TorchScript with optimization
-            with torch.jit.optimized_execution(True):
-                model = torch.jit.script(model)
-                model = torch.jit.optimize_for_inference(model)
-            
-            self.model = model
-            logger.info("Model loaded successfully")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error loading model: {e}")
-            raise
-
-    def initialize(self):
-        try:
-            if self.is_initialized:
-                return
-            
-            logger.info("Initializing model manager...")
-            
-            # Set memory limits
-            limit_memory()
-            
-            # Add tokenizer to safe globals
-            torch.serialization.add_safe_globals([XLMRobertaTokenizer])
-            
-            # Clear memory
-            self.optimize_memory()
-            
-            # Load model in chunks
-            self.load_model_in_chunks(MODEL_PATH)
-            
-            # Load tokenizer with minimal memory
-            self.tokenizer = XLMRobertaTokenizer.from_pretrained(
-                "xlm-roberta-base",
-                local_files_only=True,
-                low_cpu_mem_usage=True,
-                do_lower_case=False
-            )
-            
-            self.is_initialized = True
-            logger.info("Model manager initialized successfully")
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize model manager: {e}")
-            raise
-
-    async def analyze_text(self, text: str) -> dict:
-        """Analyze the sentiment of a given text."""
-        try:
-            if not self.is_initialized:
-                self.initialize()
-                
-            # Tokenize with minimal memory
-            inputs = self.tokenizer(
-                text,
-                return_tensors="pt",
-                truncation=True,
-                max_length=128,
-                padding=True,
-                add_special_tokens=True
-            )
-            
-            # Get prediction with minimal memory
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-                if isinstance(outputs, tuple):
-                    logits = outputs[0]
-                else:
-                    logits = outputs.logits
-                
-                predictions = torch.nn.functional.softmax(logits, dim=-1)
-                predicted_idx = predictions.argmax().item()
-                predicted_label = self.sentiment_labels[predicted_idx]
-                confidence = float(predictions.max().item())
-                
-                # Clean up
-                del outputs, predictions, inputs, logits
-                self.optimize_memory()
-                
-                return {
-                    "sentiment": predicted_label,
-                    "confidence": confidence
-                }
-                
-        except Exception as e:
-            logger.error(f"Error in sentiment analysis: {e}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to analyze sentiment: {str(e)}"
-            )
-
-# Initialize model manager
-model_manager = ModelManager()
-
-# Initialize FastAPI app with minimal settings
 app = FastAPI(
     title="Marathi Sentiment Analysis API",
-    description="API for analyzing sentiment in Marathi text",
-    version="1.0.0",
-    docs_url=None,  # Disable Swagger UI to save memory
-    redoc_url=None  # Disable ReDoc to save memory
+    description="API for analyzing sentiment in Marathi text with special handling for devotional content",
+    version="1.0.0"
 )
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize the model manager on startup"""
-    try:
-        # Set process priority to low
-        os.nice(19)
-        # Initialize model manager
-        model_manager.initialize()
-    except Exception as e:
-        logger.error(f"Failed to initialize on startup: {e}")
-        raise
-
-# Update the analyze_sentiment_text function to use model manager
-async def analyze_sentiment_text(text: str) -> dict:
-    return await model_manager.analyze_text(text)
 
 # Pre-defined Facebook credentials (from environment variables for security)
 FB_EMAIL = os.environ.get("FB_EMAIL", "saadmomin5555@gmail.com")
@@ -292,6 +39,79 @@ MODEL_PATH = os.environ.get("MODEL_PATH", "best_marathi_sentiment_model.pth")
 # Set host and port from environment variables (for cloud deployments)
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", 8002))
+
+# Memory optimization function
+def optimize_memory():
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+# Model initialization function
+def load_model(model_path):
+    try:
+        device = torch.device('cpu')
+        
+        # Load with reduced precision and memory optimizations
+        checkpoint = torch.load(model_path, map_location=device, weights_only=True)
+        
+        # Initialize model with 8-bit quantization
+        model = XLMRobertaForSequenceClassification.from_pretrained(
+            "xlm-roberta-base",
+            num_labels=3,
+            torchscript=True,
+            low_cpu_mem_usage=True
+        )
+        
+        # Prepare model for quantization
+        model.eval()
+        model = torch.quantization.quantize_dynamic(
+            model, {torch.nn.Linear}, dtype=torch.qint8
+        )
+        
+        # Load state dict
+        state_dict = checkpoint['model_state_dict']
+        if 'roberta.embeddings.position_ids' in state_dict:
+            del state_dict['roberta.embeddings.position_ids']
+        
+        model.load_state_dict(state_dict, strict=False)
+        
+        # Convert to TorchScript and optimize
+        model = torch.jit.optimize_for_inference(torch.jit.script(model))
+        
+        return model
+    except Exception as e:
+        logger.error(f"Error loading model: {e}")
+        raise
+
+# Initialize model and tokenizer
+try:
+    logger.info("Starting model initialization...")
+    
+    # Add XLMRobertaTokenizer to safe globals
+    torch.serialization.add_safe_globals([XLMRobertaTokenizer])
+    
+    # Clear memory before loading
+    optimize_memory()
+    
+    # Load model
+    model = load_model(MODEL_PATH)
+    
+    # Load tokenizer with optimizations
+    tokenizer = XLMRobertaTokenizer.from_pretrained(
+        "xlm-roberta-base",
+        local_files_only=True,
+        low_cpu_mem_usage=True
+    )
+    
+    # Convert label mapping to sentiment labels
+    sentiment_labels = {0: 'Negative', 1: 'Neutral', 2: 'Positive'}
+    
+    # Final memory cleanup
+    optimize_memory()
+    
+    logger.info("Sentiment analyzer initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize sentiment analyzer: {e}")
+    raise
 
 # Dictionary of test sentences with known sentiments for validation
 TEST_SENTENCES = {
@@ -749,6 +569,42 @@ async def root():
         "status": "operational",
         "version": "1.0.0"
     }
+
+async def analyze_sentiment_text(text: str) -> dict:
+    """Analyze the sentiment of a given text."""
+    try:
+        # Tokenize with max length to save memory
+        inputs = tokenizer(
+            text,
+            return_tensors="pt",
+            truncation=True,
+            max_length=256,  # Reduced from 512
+            padding=True
+        )
+        
+        # Get prediction with no gradient computation
+        with torch.no_grad():
+            outputs = model(**inputs)
+            predictions = torch.nn.functional.softmax(outputs.logits, dim=-1)
+            
+            predicted_idx = predictions.argmax().item()
+            predicted_label = sentiment_labels[predicted_idx]
+            confidence = float(predictions.max().item())
+            
+            # Clear memory after prediction
+            del outputs, predictions
+            optimize_memory()
+            
+            return {
+                "sentiment": predicted_label,
+                "confidence": confidence
+            }
+    except Exception as e:
+        logger.error(f"Error in sentiment analysis for text '{text[:50]}...': {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to analyze sentiment: {str(e)}"
+        )
 
 @app.post("/analyze", response_model=SentimentResponse)
 async def analyze_sentiment(request: SentimentRequest):
